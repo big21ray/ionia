@@ -8,6 +8,7 @@ lerna-debug.log*
 
 # Build outputs
 dist/
+dist-electron/
 build/
 out/
 *.tsbuildinfo
@@ -90,3 +91,12 @@ ffmpeg.exe
 thumbnails/
 .cache/
 
+# Video files (should not be committed to git)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.m4v
