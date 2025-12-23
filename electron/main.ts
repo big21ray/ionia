@@ -105,8 +105,8 @@ const createWindow = () => {
 
       if (WASAPICapture) {
         try {
-          console.log('🎤 Initializing WASAPI audio capture (desktop/headset only for debugging)...');
-          // For debugging: capture only desktop/headset audio first
+          console.log('🎤 Initializing WASAPI audio capture (desktop + microphone)...');
+          // Capture both desktop/headset and microphone
           audioCapture = new WASAPICapture((audioData: Buffer) => {
             // Early return if recording has stopped - check FIRST before anything else
             if (!isRecordingAudio) {
@@ -183,7 +183,7 @@ const createWindow = () => {
                 audioBufferSize = 0;
               }
             }
-          }, 'desktop');  // Second parameter: 'desktop' = desktop/headset audio only
+          }, 'both');  // Capture mode: 'both' = desktop/headset + microphone
 
           // Get audio format
           audioFormat = audioCapture.getFormat();
@@ -193,7 +193,7 @@ const createWindow = () => {
             // We'll let FFmpeg downmix if needed
             audioChannels = audioFormat.channels;
             audioBlockAlign = audioFormat.blockAlign || 4;
-          console.log('🎵 Audio format detected (desktop/headset only):', {
+          console.log('🎵 Audio format detected (mixed desktop + microphone):', {
             sampleRate: audioFormat.sampleRate,
             channels: audioFormat.channels,
             bitsPerSample: audioFormat.bitsPerSample,
