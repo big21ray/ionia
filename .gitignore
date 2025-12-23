@@ -100,3 +100,7 @@ thumbnails/
 *.flv
 *.wmv
 *.m4v
+
+# Audio debug/output files (should not be committed to git)
+*.wav
+node_modules
