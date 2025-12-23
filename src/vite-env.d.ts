@@ -5,7 +5,9 @@ interface ElectronAPI {
     canceled: boolean;
     filePaths: string[];
   }>;
-  startRecording: () => Promise<{
+  startRecording: (
+    mode?: 'both' | 'desktop' | 'mic'
+  ) => Promise<{
     success: boolean;
     outputPath?: string;
     error?: string;
