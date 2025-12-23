@@ -15,6 +15,18 @@ interface ElectronAPI {
     outputPath?: string;
     error?: string;
   }>;
+  getAudioStatus: () => Promise<{
+    hasAudio: boolean;
+    bytesReceived: number;
+    format: {
+      sampleRate: number;
+      channels: number;
+      bitsPerSample: number;
+      blockAlign: number;
+      bytesPerSecond: number;
+    } | null;
+    hasNativeModule: boolean;
+  }>;
 }
 
 interface Window {
