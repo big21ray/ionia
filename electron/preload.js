@@ -4,7 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 // the ipcRenderer without exposing the entire object
 contextBridge.exposeInMainWorld('electronAPI', {
   openFileDialog: () => ipcRenderer.invoke('dialog:openFile'),
-  startRecording: () => ipcRenderer.invoke('recording:start'),
+  startRecording: (mode) => ipcRenderer.invoke('recording:start', mode),
   stopRecording: () => ipcRenderer.invoke('recording:stop'),
   getAudioStatus: () => ipcRenderer.invoke('recording:audioStatus'),
 });

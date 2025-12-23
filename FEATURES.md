@@ -94,6 +94,28 @@ This document tracks current features, planned features, and features under cons
 - [ ] Bookmark system (excluded from original plan, but could be added)
 - [ ] Clipping/trimming (excluded from original plan, but could be added)
 
+## 🔧 Optimizations Needed
+
+### Audio Streaming to FFmpeg
+**Problem:** FFmpeg receives audio data in large chunks (8KB threshold), causing processing delays. For long recordings (25+ minutes), FFmpeg takes a very long time to finalize the file after recording stops.
+
+**Solution:** Optimize audio data flow to FFmpeg for real-time processing:
+
+1. **Reduce buffer threshold** in `electron/main.ts` and `native-audio/debug_record_ffmpeg.js`:
+   - Change `AUDIO_BUFFER_THRESHOLD` from `8192` (8KB) to `3840` bytes (~480 frames = 10ms @ 48kHz)
+   - This ensures more frequent, smaller chunks are sent to FFmpeg
+
+2. **Add timer-based sending** (alternative approach):
+   - Use `setInterval` to call `mixAndSendAudio()` every 10ms
+   - Ensures continuous, regular data flow regardless of buffer size
+   - Prevents FFmpeg from waiting for large chunks
+
+3. **Files to modify:**
+   - `electron/main.ts`: Update `AUDIO_BUFFER_THRESHOLD` and add interval-based sending
+   - `native-audio/debug_record_ffmpeg.js`: Same optimizations for testing
+
+**Expected result:** FFmpeg processes audio in real-time, reducing finalization time from minutes to seconds even for long recordings.
+
 ## 📝 Notes
 
 - Timeline height has been optimized to be as thin as possible while remaining usable

@@ -38,10 +38,226 @@ let audioBytesReceived = 0;
 let audioFormat: any = null;
 let audioBuffer: Buffer[] = [];
 let audioBufferSize = 0;
-let audioBlockAlign = 4; // Will be set from format (typically 4 bytes for 16-bit stereo)
+let audioBlockAlign = 8; // Will be set from format (8 bytes for 32-bit float stereo: 2ch * 4 bytes)
 let isRecordingAudio = false; // Flag to prevent processing audio after stop
 let audioWriteErrorLogged = false; // Avoid spamming EOF errors
-const AUDIO_BUFFER_THRESHOLD = 8192; // Send when we have at least 8KB buffered (multiple of block align)
+const AUDIO_BUFFER_THRESHOLD = 8192;
+
+// Audio pacing (like OBS) - send audio at a constant rate based on real-time
+let pacingStartTime: number | null = null;
+let pacingFramesSent = 0;
+const PACING_SAMPLE_RATE = 48000;
+const PACING_CHANNELS = 2;
+const PACING_BYTES_PER_FRAME = PACING_CHANNELS * 4; // 2 channels * 4 bytes (float32)
+const PACING_FRAMES_PER_10MS = Math.floor(PACING_SAMPLE_RATE / 100); // 480 frames per 10ms
+
+// Separate buffers for desktop and mic (both at 48000 Hz, stereo, float32 after resampling)
+let desktopAudioBuffer: Buffer[] = [];
+let micAudioBuffer: Buffer[] = [];
+let desktopFormat: any = null;
+let micFormat: any = null;
+
+// Flag to prevent multiple drain listeners
+let isWaitingForDrain = false;
+
+// Function to mix desktop and mic audio buffers and send to FFmpeg with pacing (like OBS)
+function mixAndSendAudio() {
+  if (!isRecordingAudio) {
+    return;
+  }
+  
+  if (!recordingProcess?.stdin || recordingProcess.stdin.destroyed) {
+    return;
+  }
+
+  const stdin = recordingProcess.stdin;
+  if ((stdin as any).writableEnded) {
+    isRecordingAudio = false;
+    return;
+  }
+
+  // Initialize pacing start time
+  if (pacingStartTime === null) {
+    pacingStartTime = Date.now();
+    pacingFramesSent = 0;
+    console.log('⏱️ Audio pacing initialized');
+  }
+
+  // Calculate how many frames we should have sent by now (based on real-time)
+  const elapsedMs = Date.now() - pacingStartTime;
+  const expectedFrames = Math.floor((elapsedMs / 1000) * PACING_SAMPLE_RATE);
+  const framesToSend = expectedFrames - pacingFramesSent;
+
+  // Don't send more than we have buffered, and limit to reasonable chunks
+  // But always send at least some data if we have it (don't wait too long)
+  // If we have no audio data yet, force sending silence to start FFmpeg
+  const desktopPcm = desktopAudioBuffer.length > 0 ? Buffer.concat(desktopAudioBuffer) : null;
+  const micPcm = micAudioBuffer.length > 0 ? Buffer.concat(micAudioBuffer) : null;
+  const hasNoAudio = !desktopPcm && !micPcm;
+  
+  const maxFramesToSend = hasNoAudio 
+    ? PACING_FRAMES_PER_10MS // Always send at least 10ms of silence if no audio
+    : Math.max(
+        Math.min(framesToSend, PACING_FRAMES_PER_10MS * 2), // Max 20ms at a time
+        framesToSend > 0 ? PACING_FRAMES_PER_10MS : 0 // But send at least 10ms worth if we're behind
+      );
+
+  if (maxFramesToSend <= 0 && !hasNoAudio) {
+    return; // Not time to send yet (only if we have audio data)
+  }
+
+  // Get the unified format (should be the same for both)
+  const format = desktopFormat || micFormat;
+  
+  // If format not available yet, use default (48000 Hz, stereo, float32)
+  const bytesPerFrame = format 
+    ? format.channels * (format.bitsPerSample / 8) 
+    : PACING_BYTES_PER_FRAME; // 8 bytes for stereo float32
+
+  // If no audio data yet, send silence to keep FFmpeg happy
+  // This prevents FFmpeg from blocking at 0 fps waiting for audio
+  if (hasNoAudio) {
+    // Send a small chunk of silence (10ms = 480 frames @ 48kHz)
+    const silenceFrames = Math.min(maxFramesToSend, PACING_FRAMES_PER_10MS);
+    const silenceBuffer = Buffer.alloc(silenceFrames * bytesPerFrame);
+    silenceBuffer.fill(0); // Fill with zeros (silence)
+    
+    try {
+      const canWrite = stdin.write(silenceBuffer, (err) => {
+        if (err) {
+          if (!audioWriteErrorLogged) {
+            console.warn('Audio write error (silence):', err.message || err);
+            audioWriteErrorLogged = true;
+          }
+          isRecordingAudio = false;
+        }
+      });
+      
+      if (!canWrite && !isWaitingForDrain) {
+        isWaitingForDrain = true;
+        stdin.once('drain', () => {
+          isWaitingForDrain = false;
+        });
+      }
+      
+      // Update pacing counter even for silence
+      pacingFramesSent += silenceFrames;
+      audioBytesReceived += silenceBuffer.length;
+      
+      // Debug: log first few silence sends
+      if (pacingFramesSent <= PACING_FRAMES_PER_10MS * 5) {
+        console.log(`🔇 Sent ${silenceFrames} frames of silence (total: ${pacingFramesSent} frames)`);
+      }
+    } catch (err) {
+      console.error('❌ Error sending silence:', err);
+    }
+    return;
+  }
+
+  // Need format for mixing
+  if (!format) {
+    return;
+  }
+
+  const desktopFrames = desktopPcm ? desktopPcm.length / bytesPerFrame : 0;
+  const micFrames = micPcm ? micPcm.length / bytesPerFrame : 0;
+  
+  // Use the minimum of both to ensure synchronization
+  // But also respect pacing - don't send more than we should
+  let outputFrames: number;
+  if (desktopFrames === 0 && micFrames === 0) {
+    return;
+  } else if (desktopFrames === 0) {
+    // Only mic - send what we have, but respect pacing
+    outputFrames = Math.min(micFrames, maxFramesToSend);
+  } else if (micFrames === 0) {
+    // Only desktop - send what we have, but respect pacing
+    outputFrames = Math.min(desktopFrames, maxFramesToSend);
+  } else {
+    // Both available - use minimum to ensure alignment, but respect pacing
+    outputFrames = Math.min(desktopFrames, micFrames, maxFramesToSend);
+  }
+
+  if (outputFrames === 0) {
+    return;
+  }
+
+  // Mix the two streams
+  const mixedBuffer = Buffer.alloc(outputFrames * bytesPerFrame);
+  const micGain = 0.9; // Slight gain reduction for mic
+
+  for (let frame = 0; frame < outputFrames; frame++) {
+    for (let ch = 0; ch < format.channels; ch++) {
+      let desktopSample = 0;
+      let micSample = 0;
+
+      // Get desktop sample
+      if (desktopPcm && frame < desktopFrames) {
+        const offset = frame * bytesPerFrame + ch * (format.bitsPerSample / 8);
+        desktopSample = desktopPcm.readFloatLE(offset);
+      }
+
+      // Get mic sample
+      if (micPcm && frame < micFrames) {
+        const offset = frame * bytesPerFrame + ch * (format.bitsPerSample / 8);
+        micSample = micPcm.readFloatLE(offset) * micGain;
+      }
+
+      // Mix and clamp
+      let mixed = desktopSample + micSample;
+      if (mixed > 1.0) mixed = 1.0;
+      if (mixed < -1.0) mixed = -1.0;
+
+      // Write mixed sample
+      const outputOffset = frame * bytesPerFrame + ch * (format.bitsPerSample / 8);
+      mixedBuffer.writeFloatLE(mixed, outputOffset);
+    }
+  }
+
+  // Clear buffers
+  desktopAudioBuffer = [];
+  micAudioBuffer = [];
+
+  // Send mixed audio to FFmpeg
+  try {
+    const alignedSize = Math.floor(mixedBuffer.length / audioBlockAlign) * audioBlockAlign;
+    if (alignedSize >= audioBlockAlign) {
+      const chunk = mixedBuffer.subarray(0, alignedSize);
+      audioBytesReceived += chunk.length;
+      
+      // Update pacing counter
+      pacingFramesSent += outputFrames;
+      
+      // Debug: log first few audio sends
+      if (pacingFramesSent <= PACING_FRAMES_PER_10MS * 10) {
+        console.log(`🎵 Sent ${outputFrames} frames of mixed audio (total: ${pacingFramesSent} frames, ${(audioBytesReceived / 1024).toFixed(1)} KB)`);
+      }
+      
+      const canWrite = stdin.write(chunk, (err) => {
+        if (err) {
+          if (!audioWriteErrorLogged) {
+            console.warn('Audio write error (likely FFmpeg stdin closed):', err.message || err);
+            audioWriteErrorLogged = true;
+          }
+          isRecordingAudio = false;
+          isWaitingForDrain = false;
+        }
+      });
+
+      if (!canWrite && !isWaitingForDrain) {
+        isWaitingForDrain = true;
+        stdin.once('drain', () => {
+          isWaitingForDrain = false;
+          // Try to send more data if available
+          mixAndSendAudio();
+        });
+      }
+    }
+  } catch (err) {
+    // Ignore write errors
+    isWaitingForDrain = false;
+  }
+}
 
 const createWindow = () => {
   // Create the browser window
@@ -73,7 +289,7 @@ const createWindow = () => {
   });
 
   // Handle recording start
-  ipcMain.handle('recording:start', async () => {
+  ipcMain.handle('recording:start', async (_event, mode?: 'both' | 'desktop' | 'mic') => {
     if (recordingProcess) {
       return { success: false, error: 'Recording already in progress' };
     }
@@ -93,6 +309,10 @@ const createWindow = () => {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       recordingOutputPath = path.join(recordingsDir, `recording_${timestamp}.mp4`);
 
+      // Normalize capture mode
+      const captureMode: 'both' | 'desktop' | 'mic' =
+        mode === 'desktop' || mode === 'mic' || mode === 'both' ? mode : 'both';
+
       // Initialize audio capture if available
       let audioSampleRate = 48000;
       let audioChannels = 2;
@@ -100,113 +320,85 @@ const createWindow = () => {
       audioFormat = null;
       audioBuffer = [];
       audioBufferSize = 0;
+      desktopAudioBuffer = [];
+      micAudioBuffer = [];
+      desktopFormat = null;
+      micFormat = null;
       isRecordingAudio = false; // Reset flag for new recording
       audioWriteErrorLogged = false; // Reset EOF error flag
+      isWaitingForDrain = false; // Reset drain flag
+      pacingStartTime = null; // Reset pacing
+      pacingFramesSent = 0;
 
       if (WASAPICapture) {
         try {
-          console.log('🎤 Initializing WASAPI audio capture (desktop + microphone)...');
-          // Capture both desktop/headset and microphone
-          audioCapture = new WASAPICapture((audioData: Buffer) => {
-            // Early return if recording has stopped - check FIRST before anything else
-            if (!isRecordingAudio) {
-              return; // Don't process, don't log, just return immediately
-            }
-            
-            const stdin = recordingProcess?.stdin;
-            if (!stdin || stdin.destroyed || (stdin as any).writableEnded) {
-              isRecordingAudio = false; // Also set flag if process is gone
-              return;
-            }
-            
-            // Only process if we have valid data and know the block align
-            if (audioData.length === 0 || audioBlockAlign === 0) {
-              return;
-            }
-            
-            // Double-check flag before incrementing (race condition protection)
+          console.log(`🎤 Initializing WASAPI audio capture (mode: ${captureMode})...`);
+          // Store capture mode for use in callback
+          const currentCaptureMode = captureMode;
+          // Capture according to requested mode - callback now receives (buffer, source, format)
+          audioCapture = new WASAPICapture((audioData: Buffer, source: string, format: any) => {
+            // Early return if recording has stopped
             if (!isRecordingAudio) {
               return;
             }
-            
-            audioBytesReceived += audioData.length;
-            
-            // Buffer audio data to ensure proper alignment
-            audioBuffer.push(audioData);
-            audioBufferSize += audioData.length;
-            
-            // Flush buffer when it reaches threshold (ensuring it's aligned to block size)
-            // We need at least one complete frame (blockAlign bytes)
-            if (audioBufferSize >= Math.max(AUDIO_BUFFER_THRESHOLD, audioBlockAlign)) {
-              try {
-                // Combine all buffered chunks
-                const combinedBuffer = Buffer.concat(audioBuffer);
-                
-                // Ensure buffer is aligned to block boundaries - only send complete frames
-                const alignedSize = Math.floor(combinedBuffer.length / audioBlockAlign) * audioBlockAlign;
-                
-                if (alignedSize >= audioBlockAlign) { // Must have at least one complete frame
-                  // Write aligned portion (guard against EOF errors)
-                  const chunk = combinedBuffer.subarray(0, alignedSize);
-                  const canWrite = stdin.write(chunk, (err) => {
-                    if (err) {
-                      // FFmpeg closed stdin (write EOF) – stop audio gracefully
-                      if (!audioWriteErrorLogged) {
-                        console.warn('Audio write error (likely FFmpeg stdin closed):', err.message || err);
-                        audioWriteErrorLogged = true;
-                      }
-                      isRecordingAudio = false;
-                      audioBuffer = [];
-                      audioBufferSize = 0;
-                    }
-                  });
-                  
-                  // Keep any remaining unaligned data in buffer
-                  if (alignedSize < combinedBuffer.length) {
-                    audioBuffer = [combinedBuffer.subarray(alignedSize)];
-                    audioBufferSize = combinedBuffer.length - alignedSize;
-                  } else {
-                    audioBuffer = [];
-                    audioBufferSize = 0;
-                  }
-                  
-                  // If write buffer is full, wait for drain
-                  if (!canWrite) {
-                    stdin.once('drain', () => {
-                      // Continue writing when buffer drains
-                    });
-                  }
-                }
-              } catch (err) {
-                // Ignore write errors (pipe might be closed)
-                audioBuffer = [];
-                audioBufferSize = 0;
-              }
-            }
-          }, 'both');  // Capture mode: 'both' = desktop/headset + microphone
 
-          // Get audio format
+            if (!audioData || audioData.length === 0) {
+              return;
+            }
+
+            // Store format info for each source
+            if (source === 'desktop') {
+              if (!desktopFormat) {
+                desktopFormat = format;
+                console.log(`🎵 Desktop format (unified): ${format.sampleRate} Hz, ${format.channels}ch, ${format.bitsPerSample}-bit`);
+                audioBlockAlign = format.blockAlign || 8;
+              }
+              desktopAudioBuffer.push(audioData);
+            } else if (source === 'mic') {
+              if (!micFormat) {
+                micFormat = format;
+                console.log(`🎵 Mic format (unified): ${format.sampleRate} Hz, ${format.channels}ch, ${format.bitsPerSample}-bit`);
+                audioBlockAlign = format.blockAlign || 8;
+              }
+              micAudioBuffer.push(audioData);
+            }
+
+            // Mix and send when we have enough data
+            // Calculate buffered sizes efficiently
+            let desktopBuffered = 0;
+            let micBuffered = 0;
+            for (const buf of desktopAudioBuffer) desktopBuffered += buf.length;
+            for (const buf of micAudioBuffer) micBuffered += buf.length;
+            const totalBuffered = desktopBuffered + micBuffered;
+
+            // Send if we have enough data:
+            // - Mode "desktop": send when desktop buffer >= threshold
+            // - Mode "mic": send when mic buffer >= threshold  
+            // - Mode "both": send when total >= threshold (don't wait for both, mix what we have)
+            const shouldSend = 
+              (currentCaptureMode === 'desktop' && desktopBuffered >= AUDIO_BUFFER_THRESHOLD) ||
+              (currentCaptureMode === 'mic' && micBuffered >= AUDIO_BUFFER_THRESHOLD) ||
+              (currentCaptureMode === 'both' && totalBuffered >= AUDIO_BUFFER_THRESHOLD);
+
+            if (shouldSend) {
+              mixAndSendAudio();
+            }
+          }, captureMode);
+
+          // Get audio format (unified format: always 48000 Hz, stereo, float32)
           audioFormat = audioCapture.getFormat();
           if (audioFormat) {
-            audioSampleRate = audioFormat.sampleRate;
-            // Use actual channel count - FFmpeg can handle multi-channel audio
-            // We'll let FFmpeg downmix if needed
-            audioChannels = audioFormat.channels;
-            audioBlockAlign = audioFormat.blockAlign || 4;
-          console.log('🎵 Audio format detected (mixed desktop + microphone):', {
-            sampleRate: audioFormat.sampleRate,
-            channels: audioFormat.channels,
-            bitsPerSample: audioFormat.bitsPerSample,
-            blockAlign: audioFormat.blockAlign,
-            bytesPerSecond: audioFormat.bytesPerSecond
-          });
-          console.log('🎤 Recording desktop/headset audio only (debugging mode)');
-          
-          // Warn if we have unusual channel count
-          if (audioFormat.channels > 2) {
-            console.log(`⚠️ WARNING: Audio has ${audioFormat.channels} channels - this may cause distortion if not handled correctly`);
-            console.log(`   Block align: ${audioFormat.blockAlign} bytes (expected ${audioFormat.channels * audioFormat.bitsPerSample / 8} bytes)`);
-          }
+            audioSampleRate = audioFormat.sampleRate; // Should be 48000
+            audioChannels = audioFormat.channels; // Should be 2 (stereo)
+            audioBlockAlign = audioFormat.blockAlign || 8; // 8 bytes for stereo float32
+            console.log(`🎵 Audio format (unified after resampling):`, {
+              sampleRate: audioFormat.sampleRate,
+              channels: audioFormat.channels,
+              bitsPerSample: audioFormat.bitsPerSample,
+              blockAlign: audioFormat.blockAlign,
+              bytesPerSecond: audioFormat.bytesPerSecond
+            });
+            console.log(`🎤 Recording audio mode: ${captureMode}`);
           } else {
             console.log('⚠️ Audio format not available yet (will be available after start)');
           }
@@ -228,18 +420,23 @@ const createWindow = () => {
 
       // Add audio input if audio capture is available
       if (audioCapture) {
-        // Use actual sample rate from capture for input
-        // FFmpeg will resample to 48 kHz in output if needed
-        console.log(`🎵 Audio input: ${audioChannels} channels at ${audioSampleRate} Hz (raw WASAPI format)`);
-        
+        // Audio input configuration (unified format: 48000 Hz, stereo, float32)
+        console.log(`🎵 Audio input: ${audioChannels} channels at ${audioSampleRate} Hz (unified format after resampling)`);
         ffmpegArgs.push(
-          // Audio input - from pipe (32‑bit float little-endian PCM, as provided by WASAPI)
-          '-f', 'f32le',
-          '-ar', String(audioSampleRate),  // Input sample rate (from capture)
-          '-ac', String(audioChannels),  // Use actual channel count from capture
+          // Audio input - from pipe (32-bit float little-endian PCM, unified format)
+          '-f', 'f32le',  // 32-bit float little-endian PCM
+          '-ar', String(audioSampleRate),  // Input sample rate (48000 Hz after resampling)
+          '-ac', String(audioChannels),  // Stereo (2 channels)
+          '-use_wallclock_as_timestamps', '1',  // Use wallclock for timestamps (prevents crackle)
           '-i', 'pipe:0'  // Read audio from stdin
         );
       }
+
+      // Sync flags (like OBS) - helps with audio/video synchronization
+      ffmpegArgs.push(
+        '-async', '1',  // Audio sync method (1 = resample audio to match video)
+        '-vsync', '1'   // Video sync method (1 = cfr - constant frame rate)
+      );
 
       // Video codec - optimized for RAM usage (max 400 MB)
       ffmpegArgs.push(
@@ -252,26 +449,16 @@ const createWindow = () => {
 
       // Add audio codec and mapping if audio is available
       if (audioCapture) {
-        // Build audio encoding args
+        // Build audio encoding args (input is already 48000 Hz, stereo after resampling)
         const audioCodecArgs = [
           // Audio codec
-          '-c:a', 'aac',
+          '-c:a', 'aac',  // AAC codec
           '-b:a', '192k',  // Audio bitrate
+          '-ar', '48000',  // Output sample rate (same as input after resampling)
+          '-ac', '2',  // Always output stereo (same as input)
         ];
-        
-        // Utiliser EXACTEMENT la fréquence du device (ex: 44100 Hz),
-        // pour éviter tout resampling et artefacts associés
-        audioCodecArgs.push('-ar', String(audioSampleRate));
-        audioCodecArgs.push('-ac', '2');  // Always output stereo (FFmpeg will downmix if needed)
-        // For multi-channel sources (e.g. 7.1), explicitly use front-left/right only to avoid weird artefacts
-        // This avoids mixing LFE/center/rear channels into stereo in a way that can sound harsh
-        audioCodecArgs.push('-filter:a', 'pan=stereo|c0=c0|c1=c1');
-        
-        if (audioChannels > 2) {
-          console.log(`🎵 Downmixing ${audioChannels} channels to stereo at 48 kHz (output), input rate = ${audioSampleRate} Hz`);
-        } else {
-          console.log(`🎵 Output: stereo at 48 kHz, input rate = ${audioSampleRate} Hz`);
-        }
+
+        console.log(`🎵 Audio output: stereo at 48000 Hz (already resampled and mixed in C++)`);
         
         ffmpegArgs.push(
           ...audioCodecArgs,
@@ -286,7 +473,7 @@ const createWindow = () => {
         '-bufsize', '8M',  // Encoding buffer size (limits RAM for encoding)
         '-maxrate', '10M',  // Maximum bitrate (helps control buffer size)
         '-threads', '2',  // Limit threads to reduce RAM usage
-        '-shortest',  // Finish encoding when the shortest input stream ends (ensures sync)
+        // Removed -shortest to let video drive encoding (audio will sync via pacing)
         '-movflags', '+frag_keyframe+empty_moov',  // Use fragmented MP4 - more tolerant of interruptions
         '-f', 'mp4',  // Explicitly specify MP4 format
         
@@ -393,6 +580,24 @@ const createWindow = () => {
                 try {
                   console.log('🎤 Starting audio capture...');
                   isRecordingAudio = true; // Set flag before starting
+                  pacingStartTime = Date.now(); // Start pacing immediately
+                  pacingFramesSent = 0;
+                  
+                  // Start audio pacing timer IMMEDIATELY (before capture starts)
+                  // This ensures FFmpeg gets data right away (silence initially)
+                  console.log('⏱️ Starting audio pacing timer...');
+                  const audioSendInterval = setInterval(() => {
+                    if (isRecordingAudio) {
+                      mixAndSendAudio();
+                    } else {
+                      clearInterval(audioSendInterval);
+                    }
+                  }, 10); // 10ms - pacing will control actual send rate
+                  
+                  // Store interval ID to clear it later
+                  (recordingProcess as any).audioSendInterval = audioSendInterval;
+                  console.log('✅ Audio pacing timer started');
+                  
                   const audioStarted = audioCapture.start();
                   if (audioStarted) {
                     console.log('✅ Audio capture started successfully');
@@ -479,6 +684,7 @@ const createWindow = () => {
           console.log('🎤 Stopping audio capture...');
           // Set flag FIRST to immediately stop processing any new callbacks
           isRecordingAudio = false;
+          isWaitingForDrain = false;
           
           // Stop the native capture - don't wait if it blocks
           // Call stop() but continue immediately to avoid blocking
@@ -506,6 +712,9 @@ const createWindow = () => {
           // Small delay to ensure all audio callbacks complete
           await new Promise(resolve => setTimeout(resolve, 200));
           console.log('📦 Flushing audio buffer...');
+          
+          // Mix and send any remaining audio
+          mixAndSendAudio();
           
           // Flush any remaining buffered audio (aligned to block boundaries)
           if (audioBuffer.length > 0 && processToStop?.stdin && !processToStop.stdin.destroyed && audioBlockAlign > 0) {
@@ -574,13 +783,13 @@ const createWindow = () => {
 
       // Close stdin properly to signal end of audio stream
       // Since stdin is used for audio input (pipe:0), closing it signals EOF to FFmpeg
-      // With -shortest flag, FFmpeg should stop when audio ends and finalize
+      // FFmpeg will stop when stdin closes and finalize
       if (processToStop.stdin && !processToStop.stdin.destroyed) {
         // Wait a bit more to ensure all audio data is written
         await new Promise(resolve => setTimeout(resolve, 200));
         
         console.log('📝 Closing stdin to signal EOF to FFmpeg...');
-        console.log('   (With -shortest flag, FFmpeg should stop when audio stream ends)');
+        console.log('   (FFmpeg will stop when stdin closes and finalize)');
         
         // Ensure stdin is flushed before closing
         if (processToStop.stdin.writable) {
@@ -591,7 +800,7 @@ const createWindow = () => {
         
         // End the stdin stream to signal EOF for audio input
         // This tells FFmpeg that the audio stream has ended
-        // With -shortest, FFmpeg should stop encoding and finalize
+        // FFmpeg should stop encoding and finalize when stdin closes
         processToStop.stdin.end(() => {
           console.log('✅ Stdin end callback fired - stream closed');
         });
@@ -611,7 +820,7 @@ const createWindow = () => {
       }
       
       // Attendre que FFmpeg termine et finalize le fichier
-      // Avec -shortest, FFmpeg devrait s'arrêter automatiquement quand stdin se ferme
+      // FFmpeg devrait s'arrêter automatiquement quand stdin se ferme
       return new Promise((resolve) => {
         // Timeout de sécurité : si FFmpeg ne se ferme pas après 15 secondes, on envoie un terminate propre
         const safetyTimeout = setTimeout(() => {

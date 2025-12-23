@@ -6,6 +6,7 @@ interface RecordingButtonProps {
 
 const RecordingButton = ({ className = '' }: RecordingButtonProps) => {
   const [isRecording, setIsRecording] = useState(false);
+  const [recordMode, setRecordMode] = useState<'both' | 'desktop' | 'mic' | null>(null);
   const [recordingTime, setRecordingTime] = useState(0);
   const [audioStatus, setAudioStatus] = useState<{
     hasAudio: boolean;
@@ -55,11 +56,12 @@ const RecordingButton = ({ className = '' }: RecordingButtonProps) => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const handleToggleRecording = async () => {
+  const startWithMode = async (mode: 'both' | 'desktop' | 'mic') => {
     try {
       if (isRecording) {
         // Stop recording - update UI immediately
         setIsRecording(false);
+        setRecordMode(null);
         
         // Stop recording in background
         const result = await window.electronAPI?.stopRecording();
@@ -70,10 +72,11 @@ const RecordingButton = ({ className = '' }: RecordingButtonProps) => {
         }
       } else {
         // Start recording
-        const result = await window.electronAPI?.startRecording();
-        console.log('Recording result:', result);
+        const result = await window.electronAPI?.startRecording(mode);
+        console.log('Recording result:', mode, result);
         if (result?.success) {
           setIsRecording(true);
+          setRecordMode(mode);
         } else {
           console.error('Failed to start recording:', result);
           const errorMsg = result?.error || result?.message || 'Unknown error. Check console for details.';
@@ -87,6 +90,7 @@ const RecordingButton = ({ className = '' }: RecordingButtonProps) => {
       // Make sure UI state is correct on error
       if (isRecording) {
         setIsRecording(false);
+        setRecordMode(null);
       }
     }
   };
@@ -99,20 +103,64 @@ const RecordingButton = ({ className = '' }: RecordingButtonProps) => {
 
   return (
     <div className="flex flex-col items-start space-y-2">
-    <button
-      onClick={handleToggleRecording}
-      className={`flex items-center space-x-2 px-4 py-2 rounded-lg transition-all ${
-        isRecording
-          ? 'bg-red-600 hover:bg-red-700 text-white'
-          : 'bg-gray-700 hover:bg-gray-600 text-gray-200'
-      } ${className}`}
-      title={isRecording ? 'Stop Recording' : 'Start Recording'}
-    >
-      <div className={`w-3 h-3 rounded-full ${isRecording ? 'bg-white animate-pulse' : 'bg-gray-400'}`} />
-      <span className="text-sm font-semibold">
-        {isRecording ? `REC ${formatTime(recordingTime)}` : 'REC'}
-      </span>
-    </button>
+      <div className="flex space-x-2">
+        <button
+          onClick={() => startWithMode('both')}
+          className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-xs transition-all ${
+            isRecording && recordMode === 'both'
+              ? 'bg-red-600 hover:bg-red-700 text-white'
+              : 'bg-gray-700 hover:bg-gray-600 text-gray-200'
+          } ${className}`}
+          title="Record screen + desktop + mic"
+        >
+          <div
+            className={`w-2 h-2 rounded-full ${
+              isRecording && recordMode === 'both' ? 'bg-white animate-pulse' : 'bg-gray-400'
+            }`}
+          />
+          <span className="font-semibold">
+            {isRecording && recordMode === 'both' ? `REC BOTH ${formatTime(recordingTime)}` : 'REC BOTH'}
+          </span>
+        </button>
+        <button
+          onClick={() => startWithMode('desktop')}
+          className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-xs transition-all ${
+            isRecording && recordMode === 'desktop'
+              ? 'bg-red-600 hover:bg-red-700 text-white'
+              : 'bg-gray-700 hover:bg-gray-600 text-gray-200'
+          }`}
+          title="Record screen + desktop only"
+        >
+          <div
+            className={`w-2 h-2 rounded-full ${
+              isRecording && recordMode === 'desktop' ? 'bg-white animate-pulse' : 'bg-gray-400'
+            }`}
+          />
+          <span className="font-semibold">
+            {isRecording && recordMode === 'desktop'
+              ? `REC DESK ${formatTime(recordingTime)}`
+              : 'REC DESK'}
+          </span>
+        </button>
+        <button
+          onClick={() => startWithMode('mic')}
+          className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-xs transition-all ${
+            isRecording && recordMode === 'mic'
+              ? 'bg-red-600 hover:bg-red-700 text-white'
+              : 'bg-gray-700 hover:bg-gray-600 text-gray-200'
+          }`}
+          title="Record screen + mic only"
+        >
+          <div
+            className={`w-2 h-2 rounded-full ${
+              isRecording && recordMode === 'mic' ? 'bg-white animate-pulse' : 'bg-gray-400'
+            }`}
+          />
+          <span className="font-semibold">
+            {isRecording && recordMode === 'mic' ? `REC MIC ${formatTime(recordingTime)}` : 'REC MIC'}
+          </span>
+        </button>
+      </div>
       
       {isRecording && audioStatus && (
         <div className="text-xs text-gray-400 bg-gray-800 px-3 py-2 rounded">
