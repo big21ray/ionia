@@ -18,8 +18,10 @@
 // Forward declaration
 class WASAPICapture;
 
-// Callback function type for audio data
-typedef std::function<void(const BYTE* data, UINT32 numFrames, DWORD flags)> AudioDataCallback;
+// Callback function type for audio data (raw, no resampling)
+// source: "desktop" or "mic"
+// format: WAVEFORMATEX* of the source format (native format from WASAPI)
+typedef std::function<void(const BYTE* data, UINT32 numFrames, const char* source, WAVEFORMATEX* format)> AudioDataCallback;
 
 class AudioCapture {
 public:
@@ -40,39 +42,23 @@ public:
     bool IsCapturing() const { return m_isCapturing; }
     
     // Get audio format info
-    // - If captureMode == "mic"      -> always microphone format
-    // - If captureMode == "desktop"  -> desktop format
-    // - If captureMode == "both" or other -> desktop if available, otherwise mic
-    WAVEFORMATEX* GetFormat() {
-        if (m_captureMode == "mic") {
-            return m_pwfxMic;
-        }
-        if (m_captureMode == "desktop") {
-            return m_pwfxDesktop;
-        }
-        // "both" or default: prefer desktop if available
-        return m_pwfxDesktop ? m_pwfxDesktop : m_pwfxMic;
-    }
+    // Always returns unified format: 48000 Hz, stereo, float32
+    // This is the format after processing pipeline
+    WAVEFORMATEX* GetFormat();
     
-    // Get sample rate
+    // Get sample rate (always 48000 Hz)
     UINT32 GetSampleRate() const { 
-        if (m_pwfxDesktop) return m_pwfxDesktop->nSamplesPerSec;
-        if (m_pwfxMic) return m_pwfxMic->nSamplesPerSec;
-        return 0;
+        return TARGET_SAMPLE_RATE;
     }
     
-    // Get channels
+    // Get channels (always 2 for stereo)
     UINT16 GetChannels() const { 
-        if (m_pwfxDesktop) return m_pwfxDesktop->nChannels;
-        if (m_pwfxMic) return m_pwfxMic->nChannels;
-        return 0;
+        return TARGET_CHANNELS;
     }
     
-    // Get bits per sample
+    // Get bits per sample (always 32 for float)
     UINT16 GetBitsPerSample() const { 
-        if (m_pwfxDesktop) return m_pwfxDesktop->wBitsPerSample;
-        if (m_pwfxMic) return m_pwfxMic->wBitsPerSample;
-        return 0;
+        return 32;
     }
 
 private:
@@ -93,18 +79,32 @@ private:
     WAVEFORMATEX* m_pwfxMic;
     HANDLE m_hEventMic;  // Event handle for event-driven capture
     
+    // Unified format (always 48000 Hz stereo float32)
+    WAVEFORMATEX* m_pwfxUnified;
+    
     // Capture threads
     std::thread m_captureThreadDesktop;
     std::thread m_captureThreadMic;
+    std::thread m_mixThread;  // Dedicated thread for mixing and callbacks
     std::atomic<bool> m_isCapturing;
     std::atomic<bool> m_shouldStop;
     bool m_comInitialized;
     
+    // Unified audio frame format: 48000 Hz, stereo, float32
+    static constexpr UINT32 TARGET_SAMPLE_RATE = 48000;
+    static constexpr UINT32 TARGET_CHANNELS = 2;
+    
+    // Unified audio frames (normalized to 48k float32 stereo)
+    struct UnifiedAudioFrame {
+        std::vector<float> samples;  // Interleaved stereo: [L0, R0, L1, R1, ...]
+        UINT32 numFrames;             // Number of stereo frames
+    };
+    
     // Audio mixing
     std::vector<BYTE> m_mixBuffer;
     std::mutex m_mixMutex;
-    std::vector<BYTE> m_desktopBuffer;
-    std::vector<BYTE> m_micBuffer;
+    UnifiedAudioFrame m_desktopFrame;  // Normalized desktop audio
+    UnifiedAudioFrame m_micFrame;      // Normalized mic audio
     UINT32 m_desktopFramesReady;
     UINT32 m_micFramesReady;
     
@@ -120,9 +120,36 @@ private:
     
     // Helper functions
     bool InitializeDesktopAudio();
-    bool InitializeMicrophone();
-    void MixAndCallback();
+    // targetFormat: optional format to force microphone into (e.g. desktop mix format)
+    // If nullptr, uses microphone's own mix format.
+    bool InitializeMicrophone(const WAVEFORMATEX* targetFormat = nullptr);
     void ConvertAndMixMicToDesktopFormat(const BYTE* micData, UINT32 micFrames);
+    
+    // Audio processing pipeline (WASAPI → Unified AudioFrame)
+    // Step 1: Convert any WASAPI format to float32
+    void ConvertToFloat32(
+        const BYTE* inData, UINT32 inFrames, const WAVEFORMATEX* inFormat,
+        std::vector<float>& outFloat
+    );
+    
+    // Step 2: Resample to target sample rate (always 48000 Hz)
+    void ResampleToTarget(
+        const std::vector<float>& inFloat, UINT32 inFrames, UINT32 inChannels, UINT32 inRate,
+        std::vector<float>& outFloat, UINT32& outFrames
+    );
+    
+    // Step 3: Adapt channels (mono → stereo, multi → stereo)
+    void AdaptChannels(
+        const std::vector<float>& inFloat, UINT32 inFrames, UINT32 inChannels,
+        std::vector<float>& outFloat, UINT32& outFrames
+    );
+    
+    // Complete pipeline: WASAPI format → Unified AudioFrame (48k float32 stereo)
+    void ProcessAudioFrame(
+        const BYTE* inData, UINT32 inFrames, const WAVEFORMATEX* inFormat,
+        UnifiedAudioFrame& outFrame
+    );
+    
     void Cleanup();
 };
 

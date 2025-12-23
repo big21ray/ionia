@@ -89,23 +89,46 @@ function downmixToStereoFloat32(pcmBuffer, channels) {
 }
 
 async function main() {
-  console.log('🔊 Starting WASAPI desktop debug recording (audio only)...');
+  console.log('🔊 Starting WASAPI audio recording with resampling (48000 Hz, stereo)...');
 
   let audioCapture = null;
-  const chunks = [];
-  let format = null;
+  const desktopChunks = [];
+  const micChunks = [];
+  let desktopFormat = null;
+  let micFormat = null;
+  let desktopCallbackCount = 0;
+  let micCallbackCount = 0;
 
   try {
-    // audioCapture = new WASAPICapture((buffer) => {
-    //   chunks.push(Buffer.from(buffer));
-    // }, 'desktop'); // desktop/headset only
-    
-    audioCapture = new WASAPICapture((buffer) => {
-      chunks.push(Buffer.from(buffer));
-    }, 'mic'); // microphone only
-
-    format = audioCapture.getFormat();
-    console.log('🎵 WASAPI format (from C++):', format);
+    audioCapture = new WASAPICapture((buffer, source, format) => {
+      // source is "desktop" or "mic"
+      // format is now the unified format (always 48000 Hz, stereo, float32) after resampling
+      if (source === 'desktop') {
+        desktopCallbackCount++;
+        desktopChunks.push(Buffer.from(buffer));
+        if (!desktopFormat) {
+          desktopFormat = format;
+          console.log(`🎵 Desktop format (unified): ${format.sampleRate} Hz, ${format.channels}ch, ${format.bitsPerSample}-bit`);
+        }
+        if (desktopCallbackCount <= 5 || desktopCallbackCount % 100 === 0) {
+          const bytesPerFrame = format.channels * (format.bitsPerSample / 8);
+          const framesInBuffer = buffer.length / bytesPerFrame;
+          console.log(`📊 Desktop callback #${desktopCallbackCount}: ${framesInBuffer} frames, ${buffer.length} bytes`);
+        }
+      } else if (source === 'mic') {
+        micCallbackCount++;
+        micChunks.push(Buffer.from(buffer));
+        if (!micFormat) {
+          micFormat = format;
+          console.log(`🎵 Mic format (unified): ${format.sampleRate} Hz, ${format.channels}ch, ${format.bitsPerSample}-bit`);
+        }
+        if (micCallbackCount <= 5 || micCallbackCount % 100 === 0) {
+          const bytesPerFrame = format.channels * (format.bitsPerSample / 8);
+          const framesInBuffer = buffer.length / bytesPerFrame;
+          console.log(`📊 Mic callback #${micCallbackCount}: ${framesInBuffer} frames, ${buffer.length} bytes`);
+        }
+      }
+    }, 'both'); // both desktop and microphone
 
     const started = audioCapture.start();
     if (!started) {
@@ -133,47 +156,130 @@ async function main() {
     }
   }
 
-  if (!format) {
-    console.error('❌ No audio format available');
-    process.exit(1);
+  console.log(`📊 Desktop callbacks: ${desktopCallbackCount}, chunks: ${desktopChunks.length}`);
+  console.log(`📊 Mic callbacks: ${micCallbackCount}, chunks: ${micChunks.length}`);
+
+  // Mix both streams if both are available
+  let mixedPcm = null;
+  let mixedFrames = 0;
+  if (desktopChunks.length > 0 && micChunks.length > 0 && desktopFormat && micFormat) {
+    console.log('\n=== Mixing Desktop + Mic ===');
+    const desktopPcm = Buffer.concat(desktopChunks);
+    const micPcm = Buffer.concat(micChunks);
+    
+    const desktopBytesPerFrame = desktopFormat.channels * (desktopFormat.bitsPerSample / 8);
+    const micBytesPerFrame = micFormat.channels * (micFormat.bitsPerSample / 8);
+    
+    const desktopFrames = desktopPcm.length / desktopBytesPerFrame;
+    const micFrames = micPcm.length / micBytesPerFrame;
+    
+    // Both should be at 48000 Hz, stereo, float32 now
+    const outputFrames = Math.max(desktopFrames, micFrames);
+    mixedFrames = outputFrames;
+    
+    console.log(`   Desktop: ${desktopFrames.toFixed(2)} frames`);
+    console.log(`   Mic: ${micFrames.toFixed(2)} frames`);
+    console.log(`   Output: ${outputFrames.toFixed(2)} frames`);
+    
+    // Mix the two streams
+    mixedPcm = Buffer.alloc(outputFrames * desktopBytesPerFrame);
+    const micGain = 0.9; // Slight gain reduction for mic to avoid clipping
+    
+    for (let frame = 0; frame < outputFrames; frame++) {
+      for (let ch = 0; ch < desktopFormat.channels; ch++) {
+        let desktopSample = 0;
+        let micSample = 0;
+        
+        // Get desktop sample
+        if (frame < desktopFrames) {
+          const offset = frame * desktopBytesPerFrame + ch * (desktopFormat.bitsPerSample / 8);
+          desktopSample = desktopPcm.readFloatLE(offset);
+        }
+        
+        // Get mic sample
+        if (frame < micFrames) {
+          const offset = frame * micBytesPerFrame + ch * (micFormat.bitsPerSample / 8);
+          micSample = micPcm.readFloatLE(offset) * micGain;
+        }
+        
+        // Mix and clamp
+        let mixed = desktopSample + micSample;
+        if (mixed > 1.0) mixed = 1.0;
+        if (mixed < -1.0) mixed = -1.0;
+        
+        // Write mixed sample
+        const outputOffset = frame * desktopBytesPerFrame + ch * (desktopFormat.bitsPerSample / 8);
+        mixedPcm.writeFloatLE(mixed, outputOffset);
+      }
+    }
+    
+    console.log(`✅ Mixed: ${mixedPcm.length} bytes`);
   }
 
-  const pcmData = Buffer.concat(chunks);
-  console.log(`📦 Captured ${pcmData.length} bytes of PCM audio`);
+  // Write mixed WAV file (if both sources available)
+  if (mixedPcm && desktopFormat) {
+    console.log('\n=== Writing Mixed Output ===');
+    const mixedWav = createWavBuffer(
+      mixedPcm,
+      desktopFormat.sampleRate,
+      desktopFormat.channels,
+      desktopFormat.bitsPerSample
+    );
+    const mixedPath = path.join(__dirname, 'debug_both_processed.wav');
+    fs.writeFileSync(mixedPath, mixedWav);
+    console.log(`✅ Mixed WAV written: ${mixedPath}`);
+    console.log(`   Format: ${desktopFormat.sampleRate} Hz, ${desktopFormat.channels}ch, ${desktopFormat.bitsPerSample}-bit`);
+    console.log(`   Frames: ${mixedFrames.toFixed(2)}, Duration: ${(mixedFrames / desktopFormat.sampleRate).toFixed(2)}s`);
+  }
 
-  // Downmix multi‑canal → stéréo float32 si besoin
-  let outPcm = pcmData;
-  let outChannels = format.channels;
-  let outBits = format.bitsPerSample;
-
-  if (format.bitsPerSample === 32 && format.channels !== 2) {
-    console.log(`🎚 Downmixing ${format.channels}ch float32 → 2ch float32 (stereo)`);
-    outPcm = downmixToStereoFloat32(pcmData, format.channels);
-    outChannels = 2;
-    outBits = 32;
-  } else if (format.channels === 1 && format.bitsPerSample === 32) {
-    console.log('🎚 Duplicating mono float32 → stereo');
-    outPcm = downmixToStereoFloat32(pcmData, 1);
-    outChannels = 2;
-    outBits = 32;
+  // Write desktop WAV file
+  if (desktopChunks.length > 0 && desktopFormat) {
+    const desktopPcm = Buffer.concat(desktopChunks);
+    const bytesPerFrame = desktopFormat.channels * (desktopFormat.bitsPerSample / 8);
+    const totalFrames = desktopPcm.length / bytesPerFrame;
+    const durationSeconds = totalFrames / desktopFormat.sampleRate;
+    
+    console.log(`📦 Desktop (processed): ${desktopPcm.length} bytes, ${totalFrames.toFixed(2)} frames, ${durationSeconds.toFixed(2)}s`);
+    console.log(`   Format: ${desktopFormat.sampleRate} Hz, ${desktopFormat.channels}ch, ${desktopFormat.bitsPerSample}-bit`);
+    
+    const desktopWav = createWavBuffer(
+      desktopPcm,
+      desktopFormat.sampleRate,
+      desktopFormat.channels,
+      desktopFormat.bitsPerSample
+    );
+    const desktopPath = path.join(__dirname, 'debug_desktop_processed.wav');
+    fs.writeFileSync(desktopPath, desktopWav);
+    console.log(`✅ Desktop WAV written: ${desktopPath}`);
   } else {
-    console.log('🎚 No downmix applied (already stereo or non-float format)');
+    console.warn('⚠️ No desktop audio captured');
   }
 
-  const baseName = path.join(__dirname, 'debug_desktop_stereo');
-
-  // WAV avec sampleRate = format.sampleRate
-  const wavHeaderRate = createWavBuffer(
-    outPcm,
-    format.sampleRate,
-    outChannels,
-    outBits
-  );
-  fs.writeFileSync(baseName + `_header_${format.sampleRate}.wav`, wavHeaderRate);
-
-  console.log('✅ Debug WAV written to:');
-  console.log('🎵 WASAPI format (from C++):', format);
-  console.log(`  - ${baseName}_header_${format.sampleRate}.wav`);
+  // Write mic WAV file
+  if (micChunks.length > 0 && micFormat) {
+    const micPcm = Buffer.concat(micChunks);
+    const bytesPerFrame = micFormat.channels * (micFormat.bitsPerSample / 8);
+    const totalFrames = micPcm.length / bytesPerFrame;
+    const durationSeconds = totalFrames / micFormat.sampleRate;
+    
+    console.log(`📦 Mic (processed): ${micPcm.length} bytes, ${totalFrames.toFixed(2)} frames, ${durationSeconds.toFixed(2)}s`);
+    console.log(`   Format: ${micFormat.sampleRate} Hz, ${micFormat.channels}ch, ${micFormat.bitsPerSample}-bit`);
+    
+    const micWav = createWavBuffer(
+      micPcm,
+      micFormat.sampleRate,
+      micFormat.channels,
+      micFormat.bitsPerSample
+    );
+    const micPath = path.join(__dirname, 'debug_mic_processed.wav');
+    fs.writeFileSync(micPath, micWav);
+    console.log(`✅ Mic WAV written: ${micPath}`);
+  } else {
+    console.warn('⚠️ No mic audio captured');
+  }
+  
+  // Explicitly exit to ensure clean termination
+  process.exit(0);
 }
 
 main().catch((err) => {
