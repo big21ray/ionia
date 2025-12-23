@@ -13,6 +13,7 @@
 #include <vector>
 #include <functional>
 #include <mutex>
+#include <string>
 
 // Forward declaration
 class WASAPICapture;
@@ -38,8 +39,20 @@ public:
     // Check if capturing
     bool IsCapturing() const { return m_isCapturing; }
     
-    // Get audio format info (uses desktop audio format if available, otherwise microphone)
-    WAVEFORMATEX* GetFormat() { return m_pwfxDesktop ? m_pwfxDesktop : m_pwfxMic; }
+    // Get audio format info
+    // - If captureMode == "mic"      -> always microphone format
+    // - If captureMode == "desktop"  -> desktop format
+    // - If captureMode == "both" or other -> desktop if available, otherwise mic
+    WAVEFORMATEX* GetFormat() {
+        if (m_captureMode == "mic") {
+            return m_pwfxMic;
+        }
+        if (m_captureMode == "desktop") {
+            return m_pwfxDesktop;
+        }
+        // "both" or default: prefer desktop if available
+        return m_pwfxDesktop ? m_pwfxDesktop : m_pwfxMic;
+    }
     
     // Get sample rate
     UINT32 GetSampleRate() const { 
@@ -97,6 +110,9 @@ private:
     
     // Callback for audio data
     AudioDataCallback m_callback;
+
+    // Remember which capture mode was requested ("mic", "desktop", "both")
+    std::string m_captureMode;
     
     // Thread functions
     void CaptureThreadDesktop();

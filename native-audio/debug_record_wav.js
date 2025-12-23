@@ -96,9 +96,13 @@ async function main() {
   let format = null;
 
   try {
+    // audioCapture = new WASAPICapture((buffer) => {
+    //   chunks.push(Buffer.from(buffer));
+    // }, 'desktop'); // desktop/headset only
+    
     audioCapture = new WASAPICapture((buffer) => {
       chunks.push(Buffer.from(buffer));
-    }, 'desktop'); // desktop/headset only
+    }, 'mic'); // microphone only
 
     format = audioCapture.getFormat();
     console.log('🎵 WASAPI format (from C++):', format);
@@ -156,21 +160,9 @@ async function main() {
     console.log('🎚 No downmix applied (already stereo or non-float format)');
   }
 
-  // Estimer le sample rate effectif à partir de la durée d’enregistrement (~10s)
-  const bytesPerSample = outBits / 8;
-  const frames = outPcm.length / (outChannels * bytesPerSample);
-  const recordSeconds = 10; // on a attendu 10s
-  const effectiveSampleRate = Math.round(frames / recordSeconds);
-
-  console.log('📏 Effective sample rate estimate:', {
-    frames,
-    seconds: recordSeconds,
-    effectiveSampleRate
-  });
-
   const baseName = path.join(__dirname, 'debug_desktop_stereo');
 
-  // WAV avec sampleRate = format.sampleRate (théorique)
+  // WAV avec sampleRate = format.sampleRate
   const wavHeaderRate = createWavBuffer(
     outPcm,
     format.sampleRate,
@@ -179,18 +171,9 @@ async function main() {
   );
   fs.writeFileSync(baseName + `_header_${format.sampleRate}.wav`, wavHeaderRate);
 
-  // WAV avec sampleRate = sample rate effectif mesuré
-  const wavEffective = createWavBuffer(
-    outPcm,
-    effectiveSampleRate,
-    outChannels,
-    outBits
-  );
-  fs.writeFileSync(baseName + `_effective_${effectiveSampleRate}.wav`, wavEffective);
-
-  console.log('✅ Debug WAVs written to:');
+  console.log('✅ Debug WAV written to:');
+  console.log('🎵 WASAPI format (from C++):', format);
   console.log(`  - ${baseName}_header_${format.sampleRate}.wav`);
-  console.log(`  - ${baseName}_effective_${effectiveSampleRate}.wav`);
 }
 
 main().catch((err) => {

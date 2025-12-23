@@ -25,6 +25,7 @@ AudioCapture::AudioCapture()
     , m_comInitialized(false)
     , m_desktopFramesReady(0)
     , m_micFramesReady(0)
+    , m_captureMode("both")
 {
 }
 
@@ -53,6 +54,7 @@ bool AudioCapture::Initialize(AudioDataCallback callback, const char* captureMod
     m_comInitialized = (hr == S_OK);  // Only uninitialize if we initialized it
     
     m_callback = callback;
+    m_captureMode = captureMode ? std::string(captureMode) : std::string("both");
     
     // Create device enumerator
     hr = CoCreateInstance(
@@ -610,15 +612,12 @@ void AudioCapture::ConvertAndMixMicToDesktopFormat(const BYTE* micData, UINT32 m
         return;
     }
     
-    // For simplicity, we'll do basic mixing assuming:
-    // - Both are 16-bit PCM (most common)
-    // - Same sample rate (or we'll just mix what we have)
-    // - We'll mix to match desktop format
-    
-    if (m_pwfxDesktop->wBitsPerSample != 16 || m_pwfxMic->wBitsPerSample != 16) {
-        // Only support 16-bit for now
-        return;
-    }
+    // We support mixing for:
+    // - 16‑bit signed PCM
+    // - 32‑bit float PCM (WASAPI mix format on your headset/mic)
+    //
+    // We assume both streams use the same sample rate (or close enough)
+    // and we always mix into the desktop format.
     
     // Calculate how many frames we can mix
     UINT32 framesToMix = std::min(micFrames, m_desktopFramesReady);
@@ -626,40 +625,77 @@ void AudioCapture::ConvertAndMixMicToDesktopFormat(const BYTE* micData, UINT32 m
         return;
     }
     
-    // Get pointers to 16-bit samples
-    int16_t* desktopSamples = reinterpret_cast<int16_t*>(m_mixBuffer.data());
-    const int16_t* micSamples = reinterpret_cast<const int16_t*>(micData);
-    
-    // Calculate samples per frame for both
     UINT32 desktopSamplesPerFrame = m_pwfxDesktop->nChannels;
     UINT32 micSamplesPerFrame = m_pwfxMic->nChannels;
     
-    // Mix samples (simple addition with clamping)
-    for (UINT32 frame = 0; frame < framesToMix; frame++) {
-        for (UINT32 ch = 0; ch < desktopSamplesPerFrame; ch++) {
-            int32_t desktopSample = desktopSamples[frame * desktopSamplesPerFrame + ch];
-            
-            // Get corresponding mic sample (handle channel mismatch)
-            int32_t micSample = 0;
-            if (ch < micSamplesPerFrame) {
-                micSample = micSamples[frame * micSamplesPerFrame + ch];
-            } else if (micSamplesPerFrame == 1 && desktopSamplesPerFrame >= 2) {
-                // Mono mic to stereo desktop - duplicate channel
-                micSample = micSamples[frame];
+    // 32‑bit float mixing path (most common with WASAPI mix format)
+    if (m_pwfxDesktop->wBitsPerSample == 32 && m_pwfxMic->wBitsPerSample == 32) {
+        float* desktopSamples = reinterpret_cast<float*>(m_mixBuffer.data());
+        const float* micSamples = reinterpret_cast<const float*>(micData);
+        const float micGain = 0.35f; // Reduce mic level to avoid saturation / clipping
+        
+        for (UINT32 frame = 0; frame < framesToMix; frame++) {
+            for (UINT32 ch = 0; ch < desktopSamplesPerFrame; ch++) {
+                float desktopSample = desktopSamples[frame * desktopSamplesPerFrame + ch];
+                
+                // Get corresponding mic sample (handle channel mismatch)
+                float micSample = 0.0f;
+                if (ch < micSamplesPerFrame) {
+                    micSample = micSamples[frame * micSamplesPerFrame + ch];
+                } else if (micSamplesPerFrame == 1 && desktopSamplesPerFrame >= 2) {
+                    // Mono mic to stereo desktop - duplicate channel
+                    micSample = micSamples[frame];
+                }
+                
+                // Apply mic gain before mixing to avoid clipping
+                float scaledMic = micSample * micGain;
+                float mixed = desktopSample + scaledMic;
+                
+                // Clamp to [-1.0, 1.0] safety
+                if (mixed > 1.0f) mixed = 1.0f;
+                if (mixed < -1.0f) mixed = -1.0f;
+                
+                desktopSamples[frame * desktopSamplesPerFrame + ch] = mixed;
             }
-            
-            // Mix with proper scaling to prevent clipping
-            // Use average mixing (divide by 2) to prevent overflow
-            // This prevents distortion when both sources are loud
-            int32_t mixed = (desktopSample + micSample) / 2;
-            
-            // Clamp to prevent overflow (shouldn't happen with division, but safety check)
-            if (mixed > 32767) mixed = 32767;
-            if (mixed < -32768) mixed = -32768;
-            
-            desktopSamples[frame * desktopSamplesPerFrame + ch] = static_cast<int16_t>(mixed);
         }
+        return;
     }
+    
+    // 16‑bit integer mixing path (fallback)
+    if (m_pwfxDesktop->wBitsPerSample == 16 && m_pwfxMic->wBitsPerSample == 16) {
+        int16_t* desktopSamples = reinterpret_cast<int16_t*>(m_mixBuffer.data());
+        const int16_t* micSamples = reinterpret_cast<const int16_t*>(micData);
+        const float micGain = 0.35f; // Reduce mic level to avoid saturation / clipping
+        
+        for (UINT32 frame = 0; frame < framesToMix; frame++) {
+            for (UINT32 ch = 0; ch < desktopSamplesPerFrame; ch++) {
+                int32_t desktopSample = desktopSamples[frame * desktopSamplesPerFrame + ch];
+                
+                // Get corresponding mic sample (handle channel mismatch)
+                int32_t micSample = 0;
+                if (ch < micSamplesPerFrame) {
+                    micSample = micSamples[frame * micSamplesPerFrame + ch];
+                } else if (micSamplesPerFrame == 1 && desktopSamplesPerFrame >= 2) {
+                    // Mono mic to stereo desktop - duplicate channel
+                    micSample = micSamples[frame];
+                }
+                
+                // Apply mic gain in fixed‑point domain to avoid saturation
+                int32_t scaledMic = static_cast<int32_t>(static_cast<float>(micSample) * micGain);
+                int32_t mixed = desktopSample + scaledMic;
+                
+                // Clamp
+                if (mixed > 32767) mixed = 32767;
+                if (mixed < -32768) mixed = -32768;
+                
+                desktopSamples[frame * desktopSamplesPerFrame + ch] = static_cast<int16_t>(mixed);
+            }
+        }
+        
+        return;
+    }
+    
+    // Unsupported combination (e.g. 24‑bit) – skip mixing for now
 }
 
 void AudioCapture::Cleanup() {

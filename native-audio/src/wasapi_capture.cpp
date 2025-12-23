@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <cstring>
+#include <string>
 
 // Structure to hold audio data and size for thread-safe callback
 struct AudioData {
@@ -27,6 +28,7 @@ private:
     
     std::unique_ptr<AudioCapture> m_capture;
     Napi::ThreadSafeFunction m_tsfn;
+    std::string m_mode; // keep capture mode alive ("mic", "desktop", "both")
     
     void OnAudioData(const BYTE* data, UINT32 numFrames, DWORD flags);
 };
@@ -61,11 +63,11 @@ WASAPICaptureAddon::WASAPICaptureAddon(const Napi::CallbackInfo& info)
     
     // Get capture mode (optional second parameter)
     // "mic" = microphone only, "desktop" = desktop only, "both" = both (default)
-    const char* captureMode = "both";
+    m_mode = "both";
     if (info.Length() >= 2 && info[1].IsString()) {
         std::string mode = info[1].As<Napi::String>().Utf8Value();
         if (mode == "mic" || mode == "desktop" || mode == "both") {
-            captureMode = mode.c_str();
+            m_mode = mode; // store in member to keep lifetime > Initialize()
         }
     }
     
@@ -86,7 +88,7 @@ WASAPICaptureAddon::WASAPICaptureAddon(const Napi::CallbackInfo& info)
         this->OnAudioData(data, numFrames, flags);
     };
     
-    if (!m_capture->Initialize(audioCallback, captureMode)) {
+    if (!m_capture->Initialize(audioCallback, m_mode.c_str())) {
         Napi::Error::New(env, "Failed to initialize WASAPI capture").ThrowAsJavaScriptException();
         return;
     }
