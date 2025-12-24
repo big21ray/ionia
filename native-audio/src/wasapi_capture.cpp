@@ -7,6 +7,10 @@
 #include <cstring>
 #include <string>
 
+// Forward declaration for AudioEngine addon
+extern Napi::Object AudioEngineAddon_Init(Napi::Env env, Napi::Object exports);
+extern Napi::Object AudioEngineEncoderAddon_Init(Napi::Env env, Napi::Object exports);
+
 // Structure to hold audio data and size for thread-safe callback
 struct AudioData {
     std::vector<uint8_t> buffer;
@@ -221,8 +225,15 @@ Napi::Value WASAPICaptureAddon::GetFormat(const Napi::CallbackInfo& info) {
     return formatObj;
 }
 
+// Forward declarations
+Napi::Object AudioEngineAddon_Init(Napi::Env env, Napi::Object exports);
+Napi::Object AudioEngineEncoderAddon_Init(Napi::Env env, Napi::Object exports);
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
-    return WASAPICaptureAddon::Init(env, exports);
+    WASAPICaptureAddon::Init(env, exports);
+    AudioEngineAddon_Init(env, exports);
+    AudioEngineEncoderAddon_Init(env, exports);
+    return exports;
 }
 
 NODE_API_MODULE(wasapi_capture, Init)

@@ -4,10 +4,19 @@
       "target_name": "wasapi_capture",
       "sources": [
         "src/wasapi_capture.cpp",
-        "src/audio_capture.cpp"
+        "src/audio_capture.cpp",
+        "src/audio_engine.cpp",
+        "src/wasapi_audio_engine.cpp",
+        "src/av_packet.cpp",
+        "src/audio_packet_manager.cpp",
+        "src/audio_encoder.cpp",
+        "src/audio_muxer.cpp",
+        "src/audio_engine_encoder.cpp",
+        "src/wasapi_audio_encoder_muxer.cpp"
       ],
       "include_dirs": [
-        "<!@(node -p \"require('node-addon-api').include\")"
+        "<!@(node -p \"require('node-addon-api').include\")",
+        "C:/vcpkg/installed/x64-windows/include"
       ],
       "defines": [
         "NAPI_DISABLE_CPP_EXCEPTIONS"
@@ -26,11 +35,18 @@
       },
       "conditions": [
         ["OS=='win'", {
+          "library_dirs": [
+            "C:/vcpkg/installed/x64-windows/lib"
+          ],
           "libraries": [
             "-lole32",
             "-loleaut32",
             "-lwinmm",
-            "-lksuser"
+            "-lksuser",
+            "avcodec.lib",
+            "avformat.lib",
+            "avutil.lib",
+            "swresample.lib"
           ]
         }],
         ["target_arch=='ia32'", {
