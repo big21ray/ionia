@@ -7,7 +7,7 @@
 
 // Forward declarations
 class VideoEncoder;
-struct AudioPacket;
+struct EncodedAudioPacket;
 
 // Forward declaration for VideoEncoder::EncodedPacket
 namespace VideoEncoderNamespace {
@@ -44,14 +44,15 @@ public:
     // Write video packet
     // packet: encoded video packet from VideoEncoder (passed as void* to avoid include dependency)
     // frameIndex: frame index (0, 1, 2, ...) - all packets from same frame use same index
-    // audioPTS: current audio PTS (in frames) for synchronization
     // Returns: true if successful
-    bool WriteVideoPacket(const void* packet, int64_t frameIndex, int64_t audioPTS);
+    // The muxer assigns PTS/DTS based on frameIndex (time_base = {1, fps})
+    bool WriteVideoPacket(const void* packet, int64_t frameIndex);
 
     // Write audio packet
-    // packet: encoded audio packet from AudioMuxer
+    // packet: encoded audio packet from AudioEncoder (BYTES ONLY, no timestamps)
     // Returns: true if successful
-    bool WriteAudioPacket(const struct AudioPacket& packet);
+    // The muxer assigns PTS/DTS based on sample count (time_base = {1, sample_rate})
+    bool WriteAudioPacket(const struct EncodedAudioPacket& packet);
 
     // Finalize muxer (write trailer, close file)
     bool Finalize();
@@ -78,12 +79,12 @@ private:
     AVCodecContext* m_audioCodecContext;  // Keep for rescaling timestamps
     AVRational m_originalVideoTimeBase;  // Store original time_base (FFmpeg may modify it)
 
-    // Synchronization
-    int64_t m_audioPTSOffset;  // Offset to align video with audio
+    // Timestamp tracking
     int64_t m_lastVideoPTS;
     int64_t m_lastVideoDTS;    // Track last DTS to ensure monotonically increasing
     int64_t m_lastAudioPTS;
-    int64_t m_videoFrameCount;  // Track video frame count for PTS calculation
+    int64_t m_videoFrameCount;  // Track video frame count for duration calculation
+    int64_t m_audioSampleCount;  // Track audio sample count for timestamps
 
     // Statistics
     uint64_t m_videoPacketCount;
@@ -93,7 +94,6 @@ private:
     // Helper methods
     bool SetupVideoStream(VideoEncoder* videoEncoder);
     bool SetupAudioStream(uint32_t audioSampleRate, uint16_t audioChannels, uint32_t audioBitrate);
-    int64_t SyncVideoPTS(int64_t videoPTS, int64_t audioPTS);
 };
 
 #endif // VIDEO_MUXER_H

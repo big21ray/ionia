@@ -1,4 +1,5 @@
 #include "audio_encoder.h"
+#include "encoded_audio_packet.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -13,7 +14,6 @@ AudioEncoder::AudioEncoder()
     , m_frame(nullptr)
     , m_packetCount(0)
     , m_totalBytes(0)
-    , m_accumulatedPTS(0)
 {
 }
 
@@ -101,7 +101,6 @@ bool AudioEncoder::Initialize(UINT32 sampleRate, UINT16 channels, UINT32 bitrate
     m_packetCount = 0;
     m_totalBytes = 0;
     m_accumulatedFrames.clear();
-    m_accumulatedPTS = 0;
     m_initialized = true;
 
     return true;
@@ -117,21 +116,16 @@ void AudioEncoder::ConvertFloat32ToInt16(const float* floatData, int16_t* int16D
     }
 }
 
-std::vector<AudioPacket> AudioEncoder::EncodeFrames(const float* pcmData, UINT32 numFrames, int64_t ptsFrames) {
-    std::vector<AudioPacket> packets;
+std::vector<EncodedAudioPacket> AudioEncoder::EncodeFrames(const float* pcmData, UINT32 numFrames) {
+    std::vector<EncodedAudioPacket> packets;
 
     if (!m_initialized || !pcmData || numFrames == 0) {
         return packets;
     }
 
-    // FIX #1: Accumulate frames instead of padding with silence
+    // Accumulate frames instead of padding with silence
     // Add new frames to accumulation buffer
     const UINT32 numSamples = numFrames * m_channels;
-    
-    // Store PTS of first frame if buffer is empty
-    if (m_accumulatedFrames.empty()) {
-        m_accumulatedPTS = ptsFrames;
-    }
     
     // Append new frames to accumulation buffer
     m_accumulatedFrames.insert(m_accumulatedFrames.end(), pcmData, pcmData + numSamples);
@@ -160,8 +154,10 @@ std::vector<AudioPacket> AudioEncoder::EncodeFrames(const float* pcmData, UINT32
             rightChannel[i] = m_accumulatedFrames[srcIdx + 1];
         }
 
-        // Set frame PTS (explicit control from AudioEngine)
-        m_frame->pts = m_accumulatedPTS;
+        // Set frame PTS (encoder needs it for internal buffering, but we use frame counter)
+        // The muxer will assign the real PTS based on sample count
+        static int64_t internalFrameCounter = 0;
+        m_frame->pts = internalFrameCounter++;
 
         // Send frame to encoder
         ret = avcodec_send_frame(m_codecContext, m_frame);
@@ -173,16 +169,11 @@ std::vector<AudioPacket> AudioEncoder::EncodeFrames(const float* pcmData, UINT32
         // Receive encoded packets
         AVPacket* avPacket = av_packet_alloc();
         while (avcodec_receive_packet(m_codecContext, avPacket) == 0) {
-            // Create AudioPacket with explicit PTS
+            // Create EncodedAudioPacket (BYTES ONLY, no timestamps)
+            // The muxer assigns all timestamps
             std::vector<uint8_t> packetData(avPacket->data, avPacket->data + avPacket->size);
             
-            // Use PTS from encoder (already scaled to codec time_base)
-            // The encoder sets PTS based on frame->pts we provided
-            int64_t packetPTS = avPacket->pts;
-            int64_t packetDTS = avPacket->dts;
-            int64_t packetDuration = avPacket->duration;
-
-            AudioPacket packet(packetData, packetPTS, packetDTS, packetDuration, avPacket->stream_index);
+            EncodedAudioPacket packet(packetData);
             packets.push_back(packet);
 
             m_packetCount++;
@@ -197,16 +188,13 @@ std::vector<AudioPacket> AudioEncoder::EncodeFrames(const float* pcmData, UINT32
         // Remove processed frames from accumulation buffer
         const UINT32 samplesToRemove = frameSize * m_channels;
         m_accumulatedFrames.erase(m_accumulatedFrames.begin(), m_accumulatedFrames.begin() + samplesToRemove);
-        
-        // Update PTS for next frame
-        m_accumulatedPTS += frameSize;
     }
 
     return packets;
 }
 
-std::vector<AudioPacket> AudioEncoder::Flush() {
-    std::vector<AudioPacket> packets;
+std::vector<EncodedAudioPacket> AudioEncoder::Flush() {
+    std::vector<EncodedAudioPacket> packets;
 
     if (!m_initialized) {
         return packets;
@@ -234,8 +222,10 @@ std::vector<AudioPacket> AudioEncoder::Flush() {
                 rightChannel[i] = m_accumulatedFrames[srcIdx + 1];
             }
 
-            // Set frame PTS
-            m_frame->pts = m_accumulatedPTS;
+            // Set frame PTS (encoder needs it for internal buffering)
+            // The muxer will assign the real PTS
+            static int64_t internalFrameCounter = 0;
+            m_frame->pts = internalFrameCounter++;
 
             // Send frame to encoder
             ret = avcodec_send_frame(m_codecContext, m_frame);
@@ -245,11 +235,8 @@ std::vector<AudioPacket> AudioEncoder::Flush() {
                 while (avcodec_receive_packet(m_codecContext, avPacket) == 0) {
                     std::vector<uint8_t> packetData(avPacket->data, avPacket->data + avPacket->size);
                     
-                    int64_t packetPTS = avPacket->pts;
-                    int64_t packetDTS = avPacket->dts;
-                    int64_t packetDuration = avPacket->duration;
-
-                    AudioPacket packet(packetData, packetPTS, packetDTS, packetDuration, avPacket->stream_index);
+                    // Create EncodedAudioPacket (BYTES ONLY, no timestamps)
+                    EncodedAudioPacket packet(packetData);
                     packets.push_back(packet);
 
                     m_packetCount++;
@@ -265,14 +252,12 @@ std::vector<AudioPacket> AudioEncoder::Flush() {
             // Remove processed frames from accumulation buffer
             const UINT32 samplesToRemove = frameSize * m_channels;
             m_accumulatedFrames.erase(m_accumulatedFrames.begin(), m_accumulatedFrames.begin() + samplesToRemove);
-            m_accumulatedPTS += frameSize;
         }
     }
     
     // OBS-like: Clear any remaining incomplete frames (don't encode them, don't pad with silence)
     // These frames are simply lost (acceptable for real-time encoding)
     m_accumulatedFrames.clear();
-    m_accumulatedPTS = 0;
 
     // Send NULL frame to flush encoder (get any remaining packets)
     int ret = avcodec_send_frame(m_codecContext, nullptr);
@@ -285,11 +270,8 @@ std::vector<AudioPacket> AudioEncoder::Flush() {
     while (avcodec_receive_packet(m_codecContext, avPacket) == 0) {
         std::vector<uint8_t> packetData(avPacket->data, avPacket->data + avPacket->size);
         
-        int64_t packetPTS = avPacket->pts;
-        int64_t packetDTS = avPacket->dts;
-        int64_t packetDuration = avPacket->duration;
-
-        AudioPacket packet(packetData, packetPTS, packetDTS, packetDuration, avPacket->stream_index);
+        // Create EncodedAudioPacket (BYTES ONLY, no timestamps)
+        EncodedAudioPacket packet(packetData);
         packets.push_back(packet);
 
         m_packetCount++;

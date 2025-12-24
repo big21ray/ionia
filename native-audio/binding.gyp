@@ -12,7 +12,12 @@
         "src/audio_encoder.cpp",
         "src/audio_muxer.cpp",
         "src/audio_engine_encoder.cpp",
-        "src/wasapi_audio_encoder_muxer.cpp"
+        "src/wasapi_audio_encoder_muxer.cpp",
+        "src/desktop_duplication.cpp",
+        "src/video_encoder.cpp",
+        "src/video_muxer.cpp",
+        "src/wasapi_video_recorder.cpp",
+        "src/wasapi_video_audio_recorder.cpp"
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
@@ -43,11 +48,19 @@
             "-loleaut32",
             "-lwinmm",
             "-lksuser",
-            "avcodec.lib",
+            "-ldxgi",
+            "-ld3d11",
             "avformat.lib",
-            "avutil.lib",
-            "swresample.lib"
-          ]
+            "avcodec.lib",
+            "swscale.lib",
+            "swresample.lib",
+            "avutil.lib"
+          ],
+          "link_settings": {
+            "libraries": [
+              "C:/vcpkg/installed/x64-windows/lib/swscale.lib"
+            ]
+          }
         }],
         ["target_arch=='ia32'", {
           "msvs_configuration_platform": "Win32"

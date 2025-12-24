@@ -39,9 +39,9 @@ public:
 
     // Encode a frame
     // frameData: RGBA32 frame data (width * height * 4 bytes)
-    // pts: presentation timestamp (in frames, from AudioEngine)
-    // Returns: vector of encoded packets (data, pts, dts, duration)
-    std::vector<EncodedPacket> EncodeFrame(const uint8_t* frameData, int64_t pts);
+    // Returns: vector of encoded packets (BYTES ONLY, no timestamps)
+    // The muxer assigns all timestamps
+    std::vector<EncodedPacket> EncodeFrame(const uint8_t* frameData);
 
     // Flush encoder (get remaining packets)
     std::vector<EncodedPacket> Flush();

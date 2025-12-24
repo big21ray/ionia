@@ -172,7 +172,7 @@ void VideoEncoder::ConvertRGBAtoYUV(const uint8_t* rgbaData, AVFrame* frame) {
               frame->data, frame->linesize);
 }
 
-std::vector<VideoEncoder::EncodedPacket> VideoEncoder::EncodeFrame(const uint8_t* frameData, int64_t pts) {
+std::vector<VideoEncoder::EncodedPacket> VideoEncoder::EncodeFrame(const uint8_t* frameData) {
     std::vector<VideoEncoder::EncodedPacket> packets;
 
     if (!m_initialized || !frameData) {
@@ -189,9 +189,9 @@ std::vector<VideoEncoder::EncodedPacket> VideoEncoder::EncodeFrame(const uint8_t
     // Convert RGBA to YUV420P
     ConvertRGBAtoYUV(frameData, m_frame);
 
-    // Set frame PTS (encoder needs it for internal buffering, but we ignore it in packets)
-    // The pts parameter is kept for encoder internal use, but we don't propagate it
-    m_frame->pts = pts;
+    // Set frame PTS (encoder needs it for internal buffering, but we use frame counter)
+    // The muxer will assign the real PTS based on frame index
+    m_frame->pts = m_frameCount;
     m_frame->pict_type = AV_PICTURE_TYPE_NONE;  // Let encoder decide
 
     // Send frame to encoder

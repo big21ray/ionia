@@ -10,6 +10,8 @@
 // Forward declaration for AudioEngine addon
 extern Napi::Object AudioEngineAddon_Init(Napi::Env env, Napi::Object exports);
 extern Napi::Object AudioEngineEncoderAddon_Init(Napi::Env env, Napi::Object exports);
+extern Napi::Object VideoRecorderInit(Napi::Env env, Napi::Object exports);
+extern Napi::Object VideoAudioRecorderInit(Napi::Env env, Napi::Object exports);
 
 // Structure to hold audio data and size for thread-safe callback
 struct AudioData {
@@ -228,11 +230,15 @@ Napi::Value WASAPICaptureAddon::GetFormat(const Napi::CallbackInfo& info) {
 // Forward declarations
 Napi::Object AudioEngineAddon_Init(Napi::Env env, Napi::Object exports);
 Napi::Object AudioEngineEncoderAddon_Init(Napi::Env env, Napi::Object exports);
+extern Napi::Object VideoRecorderInit(Napi::Env env, Napi::Object exports);
+extern Napi::Object VideoAudioRecorderInit(Napi::Env env, Napi::Object exports);
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
     WASAPICaptureAddon::Init(env, exports);
     AudioEngineAddon_Init(env, exports);
     AudioEngineEncoderAddon_Init(env, exports);
+    VideoRecorderInit(env, exports);
+    VideoAudioRecorderInit(env, exports);
     return exports;
 }
 

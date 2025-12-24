@@ -186,14 +186,14 @@ Napi::Value VideoRecorderAddon::Stop(const Napi::CallbackInfo& info) {
     // Pipeline: [EncodeFrame] → [EncodeFrame] → ... → STOP → [Flush] → END
     if (m_videoEncoder) {
         auto packets = m_videoEncoder->Flush();
-        // Use 0 for audioPTS since we don't have audio
         // Flush packets continue from the last frame
         // m_frameNumber is already incremented past the last captured frame
         // Each flush packet needs a unique, monotonically increasing DTS
         // Start from m_frameNumber and increment for each packet
         int64_t flushFrameIndex = m_frameNumber;
         for (const auto& packet : packets) {
-            m_videoMuxer->WriteVideoPacket(&packet, flushFrameIndex, 0);
+            // Muxer assigns timestamps based on frame index
+            m_videoMuxer->WriteVideoPacket(&packet, flushFrameIndex);
             m_videoPacketsEncoded++;
             flushFrameIndex++;  // Each flush packet gets a unique frame index
         }
@@ -257,11 +257,10 @@ void VideoRecorderAddon::CaptureThread() {
             int64_t timestamp;
             
             if (m_desktopDupl->CaptureFrame(frameBuffer.data(), &width, &height, &timestamp)) {
-                // Encode frame (PTS is frame number in codec time_base: 1/fps)
-                // So frame 0 = PTS 0, frame 1 = PTS 1, etc.
-                auto packets = m_videoEncoder->EncodeFrame(frameBuffer.data(), m_frameNumber);
+                // Encode frame (encoder returns BYTES ONLY, no timestamps)
+                auto packets = m_videoEncoder->EncodeFrame(frameBuffer.data());
                 
-                // Write packets to muxer (use 0 for audioPTS since no audio)
+                // Write packets to muxer (muxer assigns timestamps based on frame index)
                 // Frame-based timestamps: PTS = DTS = frame_index (in time_base {1, fps})
                 // All packets from the same frame have the same PTS and DTS
                 // CRITICAL: m_frameNumber must be valid (>= 0, never AV_NOPTS_VALUE)
@@ -275,8 +274,8 @@ void VideoRecorderAddon::CaptureThread() {
                 int64_t currentFrameIndex = m_frameNumber;
                 for (const auto& packet : packets) {
                     // Pass packet directly to muxer with frame index
-                    // All packets from same frame use same frameIndex for timestamps
-                    m_videoMuxer->WriteVideoPacket(&packet, currentFrameIndex, 0);
+                    // Muxer assigns timestamps based on frame index
+                    m_videoMuxer->WriteVideoPacket(&packet, currentFrameIndex);
                     m_videoPacketsEncoded++;
                 }
                 

@@ -2,7 +2,7 @@
 #define AUDIO_ENCODER_H
 
 #include <windows.h>
-#include "av_packet.h"
+#include "encoded_audio_packet.h"
 #include <vector>
 #include <cstdint>
 
@@ -30,13 +30,13 @@ public:
     // Encode PCM frames to AAC
     // pcmData: float32 interleaved stereo samples [L0, R0, L1, R1, ...]
     // numFrames: number of frames to encode
-    // ptsFrames: PTS in frames (from AudioEngine.GetCurrentPTSFrames())
-    // Returns: vector of AudioPackets (encoded AAC data with PTS)
-    std::vector<AudioPacket> EncodeFrames(const float* pcmData, UINT32 numFrames, int64_t ptsFrames);
+    // Returns: vector of EncodedAudioPackets (BYTES ONLY, no timestamps)
+    // The muxer assigns all timestamps
+    std::vector<EncodedAudioPacket> EncodeFrames(const float* pcmData, UINT32 numFrames);
 
     // Flush encoder (get remaining encoded packets)
-    // Returns: vector of AudioPackets
-    std::vector<AudioPacket> Flush();
+    // Returns: vector of EncodedAudioPackets (BYTES ONLY)
+    std::vector<EncodedAudioPacket> Flush();
 
     // Get codec context
     AVCodecContext* GetCodecContext() const { return m_codecContext; }
@@ -77,7 +77,6 @@ private:
     // Frame accumulation buffer (to avoid padding with silence)
     // Accumulates frames until we have enough for a complete encoder frame
     std::vector<float> m_accumulatedFrames;
-    int64_t m_accumulatedPTS;  // PTS of the first frame in accumulated buffer
 
     // Convert float32 PCM to int16 PCM (required for AAC encoder)
     void ConvertFloat32ToInt16(const float* floatData, int16_t* int16Data, UINT32 numSamples);

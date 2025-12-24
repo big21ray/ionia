@@ -1,5 +1,6 @@
 #include "audio_engine_encoder.h"
 #include "av_packet.h"
+#include "encoded_audio_packet.h"
 #include <vector>
 #include <fstream>
 #include <cstring>
@@ -56,12 +57,12 @@ bool AudioEngineWithEncoder::Initialize(const std::string& outputPath, UINT32 bi
         UINT32 numFrames = static_cast<UINT32>(packet.duration);
         int64_t ptsFrames = packet.pts;
 
-        // Encode frames
-        std::vector<AudioPacket> encodedPackets = m_encoder->EncodeFrames(pcmData, numFrames, ptsFrames);
+        // Encode frames (encoder returns BYTES ONLY, no timestamps)
+        std::vector<EncodedAudioPacket> encodedPackets = m_encoder->EncodeFrames(pcmData, numFrames);
 
         if (m_useRawAac) {
             // Write raw AAC packets with ADTS headers directly to file
-            for (const AudioPacket& encodedPacket : encodedPackets) {
+            for (const EncodedAudioPacket& encodedPacket : encodedPackets) {
                 if (m_aacFile.is_open() && encodedPacket.data.size() > 0) {
                     // Generate ADTS header (7 bytes)
                     uint8_t adtsHeader[7];
@@ -76,8 +77,13 @@ bool AudioEngineWithEncoder::Initialize(const std::string& outputPath, UINT32 bi
             }
         } else {
             // Mux encoded packets into MP4
-            for (const AudioPacket& encodedPacket : encodedPackets) {
-                m_muxer->WritePacket(encodedPacket);
+            // AudioMuxer still uses AudioPacket, so we need to create one with timestamps
+            // For audio_engine_encoder, we use AudioEngine PTS
+            for (const EncodedAudioPacket& encodedPacket : encodedPackets) {
+                // Create AudioPacket with PTS from AudioEngine
+                // AudioMuxer will handle the timestamps
+                AudioPacket audioPacket(encodedPacket.data, ptsFrames, ptsFrames, numFrames, 0);
+                m_muxer->WritePacket(audioPacket);
             }
         }
     };
@@ -108,11 +114,14 @@ void AudioEngineWithEncoder::Stop() {
 
         // Flush encoder
         if (m_encoder && m_encoder->IsInitialized()) {
-            std::vector<AudioPacket> flushedPackets = m_encoder->Flush();
+            std::vector<EncodedAudioPacket> flushedPackets = m_encoder->Flush();
+            
+            // Get current PTS from engine for flushed packets
+            int64_t flushPTS = m_engine ? static_cast<int64_t>(m_engine->GetCurrentPTSFrames()) : 0;
             
             if (m_useRawAac) {
                 // Write flushed packets to raw AAC file with ADTS headers
-                for (const AudioPacket& packet : flushedPackets) {
+                for (const EncodedAudioPacket& packet : flushedPackets) {
                     if (m_aacFile.is_open() && packet.data.size() > 0) {
                         // Generate ADTS header (7 bytes)
                         uint8_t adtsHeader[7];
@@ -131,8 +140,12 @@ void AudioEngineWithEncoder::Stop() {
                 }
             } else {
                 // Mux flushed packets into MP4
-                for (const AudioPacket& packet : flushedPackets) {
-                    m_muxer->WritePacket(packet);
+                // AudioMuxer still uses AudioPacket, so we need to create one with timestamps
+                for (const EncodedAudioPacket& packet : flushedPackets) {
+                    // Create AudioPacket with PTS (AudioMuxer will handle it)
+                    AudioPacket audioPacket(packet.data, flushPTS, flushPTS, 1024, 0);  // 1024 = typical AAC frame size
+                    m_muxer->WritePacket(audioPacket);
+                    flushPTS += 1024;
                 }
                 // Finalize muxer
                 if (m_muxer && m_muxer->IsInitialized()) {

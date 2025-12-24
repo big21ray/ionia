@@ -1,6 +1,6 @@
 #include "video_muxer.h"
 #include "video_encoder.h"
-#include "av_packet.h"
+#include "encoded_audio_packet.h"
 #include <libavutil/mem.h>
 #include <cstring>
 #include <cstdio>
@@ -11,11 +11,11 @@ VideoMuxer::VideoMuxer()
     , m_videoStream(nullptr)
     , m_audioStream(nullptr)
     , m_audioCodecContext(nullptr)
-    , m_audioPTSOffset(0)
     , m_lastVideoPTS(0)
     , m_lastVideoDTS(-1)  // Start at -1 so first DTS can be 0
     , m_lastAudioPTS(0)
     , m_videoFrameCount(0)
+    , m_audioSampleCount(0)
     , m_videoPacketCount(0)
     , m_audioPacketCount(0)
     , m_totalBytes(0)
@@ -104,10 +104,10 @@ bool VideoMuxer::Initialize(const std::string& outputPath,
     m_lastVideoDTS = -1;  // Start at -1 so first DTS can be 0
     m_lastAudioPTS = 0;
     m_videoFrameCount = 0;
+    m_audioSampleCount = 0;
     m_videoPacketCount = 0;
     m_audioPacketCount = 0;
     m_totalBytes = 0;
-    m_audioPTSOffset = 0;
 
     m_initialized = true;
     fprintf(stderr, "[VideoMuxer] Initialized: %s\n", outputPath.c_str());
@@ -217,38 +217,8 @@ bool VideoMuxer::SetupAudioStream(uint32_t audioSampleRate, uint16_t audioChanne
     return true;
 }
 
-int64_t VideoMuxer::SyncVideoPTS(int64_t videoPTS, int64_t audioPTS) {
-    // Synchronize video PTS with audio PTS
-    // Audio is the master clock (from AudioEngine)
-    // If no audio (audioPTS == 0), just use video PTS as-is
-    
-    if (audioPTS <= 0) {
-        // No audio: use video PTS directly
-        return videoPTS;
-    }
-    
-    if (m_audioPTSOffset == 0 && audioPTS > 0) {
-        // First audio packet: calculate offset
-        // Convert video PTS to audio time base
-        AVRational videoTimeBase = m_videoStream->time_base;
-        AVRational audioTimeBase = m_audioStream->time_base;
-        
-        int64_t videoTime = av_rescale_q(videoPTS, videoTimeBase, audioTimeBase);
-        m_audioPTSOffset = audioPTS - videoTime;
-    }
 
-    // Apply offset to video PTS
-    AVRational videoTimeBase = m_videoStream->time_base;
-    AVRational audioTimeBase = m_audioStream->time_base;
-    
-    int64_t videoTime = av_rescale_q(videoPTS, videoTimeBase, audioTimeBase);
-    int64_t syncedPTS = videoTime + m_audioPTSOffset;
-    
-    // Convert back to video time base
-    return av_rescale_q(syncedPTS, audioTimeBase, videoTimeBase);
-}
-
-bool VideoMuxer::WriteVideoPacket(const void* packetPtr, int64_t frameIndex, int64_t audioPTS) {
+bool VideoMuxer::WriteVideoPacket(const void* packetPtr, int64_t frameIndex) {
     if (!m_initialized || !packetPtr) {
         return false;
     }
@@ -283,27 +253,16 @@ bool VideoMuxer::WriteVideoPacket(const void* packetPtr, int64_t frameIndex, int
     avPacket->size = packet->data.size();
 
     // OBS-STYLE: Muxer is the ONLY source of truth for timestamps
-    // Frame-based monotonic counter - NEVER AV_NOPTS_VALUE
-    // Use the provided frameIndex (all packets from same frame share same index)
     // Frame-based timestamps: PTS = DTS = frame_index (in time_base {1, fps})
-    int64_t framePTS = frameIndex;
-    int64_t frameDTS = frameIndex;  // DTS = PTS (no B-frames)
-    
-    // Sync with audio if audio exists
-    if (audioPTS > 0) {
-        framePTS = SyncVideoPTS(framePTS, audioPTS);
-        frameDTS = framePTS;  // DTS = PTS after sync too
-    }
-    
-    // Set PTS, DTS, and duration (frame-based, monotonic)
-    avPacket->pts = framePTS;
-    avPacket->dts = frameDTS;
+    // No synchronization needed - av_interleaved_write_frame handles it
+    avPacket->pts = frameIndex;
+    avPacket->dts = frameIndex;  // DTS = PTS (no B-frames)
     avPacket->duration = 1;  // 1 frame duration
     
     // CRITICAL: Verify timestamps are set correctly before writing
     if (avPacket->pts == AV_NOPTS_VALUE || avPacket->dts == AV_NOPTS_VALUE || avPacket->pts < 0 || avPacket->dts < 0) {
-        fprintf(stderr, "[VideoMuxer] FATAL: Invalid timestamps after setting! framePTS=%lld frameDTS=%lld avPacket->pts=%lld avPacket->dts=%lld\n",
-                framePTS, frameDTS, avPacket->pts, avPacket->dts);
+        fprintf(stderr, "[VideoMuxer] FATAL: Invalid timestamps after setting! frameIndex=%lld avPacket->pts=%lld avPacket->dts=%lld\n",
+                frameIndex, avPacket->pts, avPacket->dts);
         av_packet_free(&avPacket);
         return false;
     }
@@ -321,8 +280,8 @@ bool VideoMuxer::WriteVideoPacket(const void* packetPtr, int64_t frameIndex, int
     
     // Verify timestamps are still valid after rescale
     if (avPacket->pts == AV_NOPTS_VALUE || avPacket->dts == AV_NOPTS_VALUE || avPacket->pts < 0 || avPacket->dts < 0) {
-        fprintf(stderr, "[VideoMuxer] FATAL: Timestamps became invalid after rescale! framePTS=%lld frameDTS=%lld avPacket->pts=%lld avPacket->dts=%lld\n",
-                framePTS, frameDTS, avPacket->pts, avPacket->dts);
+        fprintf(stderr, "[VideoMuxer] FATAL: Timestamps became invalid after rescale! frameIndex=%lld avPacket->pts=%lld avPacket->dts=%lld\n",
+                frameIndex, avPacket->pts, avPacket->dts);
         av_packet_free(&avPacket);
         return false;
     }
@@ -347,21 +306,27 @@ bool VideoMuxer::WriteVideoPacket(const void* packetPtr, int64_t frameIndex, int
     // Update last PTS and DTS (for duration calculation)
     // Track maximum PTS/DTS seen (using frame-based timestamps)
     // Use >= instead of > to ensure we update even if same frame index is used multiple times
-    if (framePTS >= m_lastVideoPTS) {
-        m_lastVideoPTS = framePTS;
-        // Update frame count when we see a new or same frame
-        // framePTS is the frame index, so total frames = framePTS + 1
-        m_videoFrameCount = framePTS + 1;
+    if (frameIndex >= m_lastVideoPTS) {
+        m_lastVideoPTS = frameIndex;
     }
     
-    if (frameDTS >= m_lastVideoDTS) {
-        m_lastVideoDTS = frameDTS;
+    // Track frame count using ORIGINAL frame index
+    // This ensures duration calculation is correct
+    if (frameIndex >= 0) {
+        // frameIndex is 0-indexed, so total frames = frameIndex + 1
+        if (frameIndex + 1 > m_videoFrameCount) {
+            m_videoFrameCount = frameIndex + 1;
+        }
+    }
+    
+    if (frameIndex >= m_lastVideoDTS) {
+        m_lastVideoDTS = frameIndex;
     }
 
     return true;
 }
 
-bool VideoMuxer::WriteAudioPacket(const AudioPacket& packet) {
+bool VideoMuxer::WriteAudioPacket(const EncodedAudioPacket& packet) {
     if (!m_initialized || !packet.isValid()) {
         return false;
     }
@@ -382,16 +347,23 @@ bool VideoMuxer::WriteAudioPacket(const AudioPacket& packet) {
     std::memcpy(avPacket->data, packet.data.data(), packet.data.size());
     avPacket->size = packet.data.size();
 
-    // Set PTS/DTS (explicit control from AudioEngine)
-    avPacket->pts = packet.pts;
-    avPacket->dts = packet.dts;
-    avPacket->duration = packet.duration;
+    // OBS-STYLE: Muxer is the ONLY source of truth for timestamps
+    // Audio timestamps: PTS = DTS = sample_count (in time_base {1, sample_rate})
+    // Calculate duration based on AAC frame size (typically 1024 samples at 48kHz)
+    // For AAC, each packet typically contains 1024 samples
+    static const int64_t aacFrameSize = 1024;  // Typical AAC frame size
+    
+    avPacket->pts = m_audioSampleCount;
+    avPacket->dts = m_audioSampleCount;  // DTS = PTS (no B-frames in audio)
+    avPacket->duration = aacFrameSize;  // Duration in samples
     avPacket->stream_index = m_audioStream->index;
 
     // Rescale timestamps to stream time base
+    // Audio time_base is {1, sample_rate}, so no rescale needed if stream time_base matches
+    // But we rescale to be safe
     av_packet_rescale_ts(avPacket, m_audioCodecContext->time_base, m_audioStream->time_base);
 
-    // Write packet
+    // Write packet using av_interleaved_write_frame (handles A/V sync automatically)
     ret = av_interleaved_write_frame(m_formatContext, avPacket);
     
     av_packet_free(&avPacket);
@@ -405,7 +377,8 @@ bool VideoMuxer::WriteAudioPacket(const AudioPacket& packet) {
 
     m_audioPacketCount++;
     m_totalBytes += packet.data.size();
-    m_lastAudioPTS = packet.pts;
+    m_audioSampleCount += aacFrameSize;  // Update sample count for next packet
+    m_lastAudioPTS = m_audioSampleCount;  // Track for duration calculation
 
     return true;
 }

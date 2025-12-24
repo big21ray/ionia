@@ -46,7 +46,14 @@ if (!nativeModule) {
   throw new Error(errorMsg);
 }
 
-module.exports = nativeModule;
+// Export modules
+module.exports = {
+  WASAPICapture: nativeModule.WASAPICapture,
+  AudioEngine: nativeModule.AudioEngine,
+  AudioEngineEncoder: nativeModule.AudioEngineEncoder,
+  VideoRecorder: nativeModule.VideoRecorder || null,  // May not be available if not compiled
+  VideoAudioRecorder: nativeModule.VideoAudioRecorder || null  // May not be available if not compiled
+};
 
 
 
