@@ -99,3 +99,4 @@ Error: Failed to initialize Video Encoder
 - `main.ts:122` = Source TypeScript (line 122)
 - The actual C++ error is in `stderr`, not in this stack trace!
 
+

@@ -71,3 +71,4 @@ private:
 #endif // DESKTOP_DUPLICATION_H
 
 
+

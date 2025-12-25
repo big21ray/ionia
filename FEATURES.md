@@ -45,6 +45,33 @@ This document tracks current features, planned features, and features under cons
 - [x] Responsive layout
 - [x] Smooth transitions and animations
 
+### Recording Features
+- [x] Screen recording with audio (desktop + microphone)
+- [x] Video + Audio synchronized recording
+- [x] libx264 codec support (works in Electron STA mode)
+- [x] COM threading mode detection (STA/MTA)
+- [x] Automatic codec selection (rejects h264_mf in STA mode)
+
+## 🚧 Next Steps (Priority)
+
+### Recording Enhancements
+- [ ] **Livestream option** - Add a stream button in the Electron app
+  - Stream to RTMP server (Twitch, YouTube, etc.)
+  - Configure stream URL and key
+  - Stream quality settings
+  
+- [ ] **Window recording** - Record video only from a specific window
+  - Window selection UI
+  - Capture specific application window instead of full screen
+  - Window border detection and cropping
+
+- [ ] **Build & Distribution** - Compile to installable .exe
+  - Electron Builder configuration
+  - Auto-updater setup
+  - Installer generation (NSIS/Inno Setup)
+  - Code signing for Windows
+  - Package native modules correctly
+
 ## 🚧 Planned Features (From PlayerPlan.md)
 
 ### Phase 5: Library View
