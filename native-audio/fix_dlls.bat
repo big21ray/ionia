@@ -118,6 +118,25 @@ if errorlevel 1 (
 ) else (
     echo [OK] swresample.dll
 )
+
+REM Copy libx264 DLL (dependency of avcodec.dll)
+if exist "%FFMPEG_SOURCE%\libx264-164.dll" (
+    copy /Y "%FFMPEG_SOURCE%\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+    if errorlevel 1 (
+        echo WARNING: Failed to copy libx264-164.dll
+    ) else (
+        echo [OK] libx264-164.dll
+    )
+) else (
+    REM Try to find libx264 in vcpkg installed
+    if exist "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" (
+        copy /Y "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+        if not errorlevel 1 (
+            echo [OK] libx264-164.dll (from vcpkg installed)
+        )
+    )
+)
+
 goto :verify
 
 :copy_dlls_from_buildtree
@@ -153,6 +172,22 @@ if errorlevel 1 (
     echo ERROR: Failed to copy swresample.dll
 ) else (
     echo [OK] swresample.dll
+)
+
+REM Copy libx264 DLL (dependency of avcodec.dll)
+if exist "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" (
+    copy /Y "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+    if not errorlevel 1 (
+        echo [OK] libx264-164.dll (from vcpkg installed)
+    )
+) else (
+    REM Try to find in buildtrees
+    if exist "C:\vcpkg\buildtrees\x264\x64-windows-dbg\libx264-164.dll" (
+        copy /Y "C:\vcpkg\buildtrees\x264\x64-windows-dbg\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+        if not errorlevel 1 (
+            echo [OK] libx264-164.dll (from buildtrees)
+        )
+    )
 )
 
 REM Copy all other DLLs from buildtree (dependencies)

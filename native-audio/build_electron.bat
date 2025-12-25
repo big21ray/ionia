@@ -87,6 +87,11 @@ if exist "%BUILD_OUTPUT%\wasapi_capture.node" (
         copy /Y "%FFMPEG_BIN%\avutil.dll" "%BUILD_OUTPUT%\" >nul 2>&1
         copy /Y "%FFMPEG_BIN%\swresample.dll" "%BUILD_OUTPUT%\" >nul 2>&1
         
+        REM Copy libx264 DLL (dependency of avcodec.dll)
+        if exist "%FFMPEG_BIN%\libx264-164.dll" (
+            copy /Y "%FFMPEG_BIN%\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+        )
+        
         if exist "%BUILD_OUTPUT%\avcodec.dll" (
             echo FFmpeg DLLs copied successfully
         ) else (
@@ -104,6 +109,13 @@ if exist "%BUILD_OUTPUT%\wasapi_capture.node" (
             copy /Y "%FFMPEG_BUILDTREE%\libavformat\avformat.dll" "%BUILD_OUTPUT%\" >nul 2>&1
             copy /Y "%FFMPEG_BUILDTREE%\libavutil\avutil.dll" "%BUILD_OUTPUT%\" >nul 2>&1
             copy /Y "%FFMPEG_BUILDTREE%\libswresample\swresample.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+            
+            REM Copy libx264 DLL (dependency of avcodec.dll)
+            if exist "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" (
+                copy /Y "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+            ) else if exist "C:\vcpkg\buildtrees\x264\x64-windows-dbg\libx264-164.dll" (
+                copy /Y "C:\vcpkg\buildtrees\x264\x64-windows-dbg\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+            )
             
             REM Copy all other DLLs from buildtree (dependencies)
             for /r "%FFMPEG_BUILDTREE%" %%f in (*.dll) do (
@@ -148,6 +160,7 @@ if exist "%~dp0fix_dlls.bat" (
 
 echo.
 pause
+
 
 
 
