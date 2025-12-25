@@ -108,3 +108,7 @@ node_modules
 
 # PowerShell diagnostic scripts (keep local, don't commit)
 *.ps1
+
+# Development startup scripts (use npm run electron:dev instead)
+start-dev.bat
+start-dev.ps1
