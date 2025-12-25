@@ -105,3 +105,6 @@ thumbnails/
 *.wav
 *.aac
 node_modules
+
+# PowerShell diagnostic scripts (keep local, don't commit)
+*.ps1
