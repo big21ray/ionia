@@ -12,6 +12,12 @@ dist-electron/
 build/
 out/
 *.tsbuildinfo
+*.obj
+*.pdb
+*.exp
+*.lib
+*.iobj
+*.ipdb
 
 # Electron
 *.asar
