@@ -12,7 +12,8 @@
     "rebuild:native": "cd native-audio && node-gyp clean && node-gyp rebuild --msvs_version=2022",
     "build:native:electron": "cd native-audio && node-gyp rebuild --target=28.0.0 --arch=x64 --disturl=https://electronjs.org/headers --msvs_version=2022",
     "preview": "vite preview",
-    "electron:dev": "npm run build:electron && concurrently \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:dev": "npm run build:electron && concurrently -k -s first \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron:dev:win": "powershell -ExecutionPolicy Bypass -File ./start-dev.ps1",
     "electron:build": "npm run build && npm run build:electron && npm run build:native && electron-builder"
   },
   "keywords": [

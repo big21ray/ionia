@@ -1,8 +1,17 @@
 @echo off
 echo ========================================
-echo Building WASAPI Capture Native Module
+echo Building WASAPI Capture Native Module for Electron
 echo ========================================
 echo.
+
+REM Setup Visual Studio environment
+echo [1/4] Setting up Visual Studio environment...
+call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
+if errorlevel 1 (
+    echo ERROR: Failed to setup Visual Studio environment
+    pause
+    exit /b 1
+)
 
 REM Set Python path (if available)
 if exist "C:\KarmineDev\anaconda3\python.exe" (
@@ -13,14 +22,9 @@ if exist "C:\KarmineDev\anaconda3\python.exe" (
     echo node-gyp may fail if Python is required
 )
 
-REM Set node-gyp variables (node-gyp will auto-detect Visual Studio)
+REM Set node-gyp variables
 set GYP_MSVS_VERSION=2022
 set GYP_MSVS_OVERRIDE_PATH=C:\Program Files\Microsoft Visual Studio\18\Community
-
-REM Note: We skip calling vcvarsall.bat to avoid "command line too long" errors
-REM node-gyp will automatically find and use Visual Studio 2022
-echo [1/4] Using node-gyp auto-detection for Visual Studio...
-echo       (Skipping vcvarsall.bat to avoid PATH length issues)
 
 REM Change to script directory
 cd /d "%~dp0"
@@ -35,7 +39,7 @@ set FFMPEG_BIN=C:\vcpkg\installed\x64-windows\bin
 
 if not exist "%FFMPEG_INCLUDE%\libavcodec\avcodec.h" (
     echo WARNING: FFmpeg headers not found at %FFMPEG_INCLUDE%
-    echo Please install FFmpeg via vcpkg or update FFMPEG_INCLUDE path in build.bat
+    echo Please install FFmpeg via vcpkg or update FFMPEG_INCLUDE path in build_electron.bat
     echo.
 ) else (
     echo FFmpeg headers found: %FFMPEG_INCLUDE%
@@ -43,26 +47,17 @@ if not exist "%FFMPEG_INCLUDE%\libavcodec\avcodec.h" (
 
 if not exist "%FFMPEG_LIB%\avcodec.lib" (
     echo WARNING: FFmpeg libraries not found at %FFMPEG_LIB%
-    echo Please install FFmpeg via vcpkg or update FFMPEG_LIB path in build.bat
+    echo Please install FFmpeg via vcpkg or update FFMPEG_LIB path in build_electron.bat
     echo.
 ) else (
     echo FFmpeg libraries found: %FFMPEG_LIB%
 )
 echo.
 
-REM Build with node-gyp
-echo [3/4] Building native module with node-gyp...
-REM Note: 'rebuild' performs a clean build, ensuring all source files are recompiled
-REM This includes: video_muxer.cpp, video_encoder.cpp, wasapi_video_recorder.cpp, and all other sources
-REM Use node-gyp from node_modules (it will auto-detect Visual Studio)
-if exist "%~dp0\..\node_modules\.bin\node-gyp.cmd" (
-    call "%~dp0\..\node_modules\.bin\node-gyp.cmd" rebuild --msvs_version=2022
-) else if exist "%~dp0node_modules\.bin\node-gyp.cmd" (
-    call "%~dp0node_modules\.bin\node-gyp.cmd" rebuild --msvs_version=2022
-) else (
-    REM Try global node-gyp
-    node-gyp rebuild --msvs_version=2022
-)
+REM Build with node-gyp for Electron
+echo [3/4] Building native module with node-gyp for Electron...
+echo Target: Electron 28.0.0
+call "%~dp0\..\node_modules\.bin\node-gyp.cmd" rebuild --target=28.0.0 --arch=x64 --disturl=https://electronjs.org/headers --msvs_version=2022
 if errorlevel 1 (
     echo.
     echo ERROR: Build failed!
@@ -71,7 +66,7 @@ if errorlevel 1 (
     echo 1. Install Python 3.x and add to PATH
     echo 2. Set PYTHON environment variable: set PYTHON=C:\Path\To\python.exe
     echo 3. Install FFmpeg via vcpkg: vcpkg install ffmpeg:x64-windows
-    echo 4. Update FFMPEG_INCLUDE and FFMPEG_LIB paths in build.bat
+    echo 4. Update FFMPEG_INCLUDE and FFMPEG_LIB paths in build_electron.bat
     echo.
     pause
     exit /b 1
@@ -140,6 +135,7 @@ echo Build completed successfully!
 echo ========================================
 echo.
 echo Output: %BUILD_OUTPUT%\wasapi_capture.node
+echo Compiled for Electron 28.0.0
 echo.
 
 REM Run fix_dlls.bat to ensure all DLLs are copied
@@ -152,4 +148,6 @@ if exist "%~dp0fix_dlls.bat" (
 
 echo.
 pause
+
+
 

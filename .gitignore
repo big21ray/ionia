@@ -103,4 +103,5 @@ thumbnails/
 
 # Audio debug/output files (should not be committed to git)
 *.wav
+*.aac
 node_modules

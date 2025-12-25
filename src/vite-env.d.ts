@@ -5,9 +5,7 @@ interface ElectronAPI {
     canceled: boolean;
     filePaths: string[];
   }>;
-  startRecording: (
-    mode?: 'both' | 'desktop' | 'mic'
-  ) => Promise<{
+  startRecording: () => Promise<{
     success: boolean;
     outputPath?: string;
     error?: string;
@@ -16,18 +14,6 @@ interface ElectronAPI {
     success: boolean;
     outputPath?: string;
     error?: string;
-  }>;
-  getAudioStatus: () => Promise<{
-    hasAudio: boolean;
-    bytesReceived: number;
-    format: {
-      sampleRate: number;
-      channels: number;
-      bitsPerSample: number;
-      blockAlign: number;
-      bytesPerSecond: number;
-    } | null;
-    hasNativeModule: boolean;
   }>;
 }
 

@@ -153,8 +153,8 @@ void AudioEngine::MixAudio(UINT32 numFrames, std::vector<float>& output) {
     }
 
     // Remove consumed frames from buffers
-    const UINT32 desktopSamplesToRemove = std::min(numSamples, static_cast<UINT32>(m_desktopBuffer.size()));
-    const UINT32 micSamplesToRemove = std::min(numSamples, static_cast<UINT32>(m_micBuffer.size()));
+    const UINT32 desktopSamplesToRemove = (std::min)(numSamples, static_cast<UINT32>(m_desktopBuffer.size()));
+    const UINT32 micSamplesToRemove = (std::min)(numSamples, static_cast<UINT32>(m_micBuffer.size()));
 
     if (desktopSamplesToRemove > 0) {
         m_desktopBuffer.erase(m_desktopBuffer.begin(), m_desktopBuffer.begin() + desktopSamplesToRemove);
@@ -185,7 +185,7 @@ void AudioEngine::Tick() {
 
     // Limit to reasonable chunks (max 100ms = 4800 frames at 48kHz)
     const UINT32 maxFramesPerTick = (SAMPLE_RATE / 10);  // 100ms
-    const UINT32 outputFrames = static_cast<UINT32>(std::min(static_cast<UINT64>(framesToSend), static_cast<UINT64>(maxFramesPerTick)));
+    const UINT32 outputFrames = static_cast<UINT32>((std::min)(static_cast<UINT64>(framesToSend), static_cast<UINT64>(maxFramesPerTick)));
 
     if (outputFrames == 0) {
         return;

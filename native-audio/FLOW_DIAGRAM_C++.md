@@ -237,3 +237,5 @@ Problèmes potentiels:
 4. **Vérifier le PTS** à chaque étape
 5. **Vérifier les tailles de buffers** et frame counts
 
+
+
