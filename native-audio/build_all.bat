@@ -86,66 +86,9 @@ if errorlevel 1 (
 REM Copy FFmpeg DLLs to output directory (Node.js build)
 echo [3/3] Copying FFmpeg DLLs to build output (Node.js)...
 set BUILD_OUTPUT=build\Release
-if exist "%BUILD_OUTPUT%\wasapi_capture.node" (
-    echo Module compiled successfully: %BUILD_OUTPUT%\wasapi_capture.node
-    
-    REM Try standard vcpkg bin directory first
-    if exist "%FFMPEG_BIN%\avcodec.dll" (
-        echo Copying FFmpeg DLLs from %FFMPEG_BIN%...
-        copy /Y "%FFMPEG_BIN%\avcodec.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-        copy /Y "%FFMPEG_BIN%\avformat.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-        copy /Y "%FFMPEG_BIN%\avutil.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-        copy /Y "%FFMPEG_BIN%\swresample.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-        
-        REM Copy libx264 DLL (dependency of avcodec.dll)
-        if exist "%FFMPEG_BIN%\libx264-164.dll" (
-            copy /Y "%FFMPEG_BIN%\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-        )
-        
-        if exist "%BUILD_OUTPUT%\avcodec.dll" (
-            echo FFmpeg DLLs copied successfully
-        ) else (
-            goto :try_buildtrees_node
-        )
-    ) else (
-        :try_buildtrees_node
-        REM If not found, try buildtrees (debug build)
-        if exist "C:\vcpkg\buildtrees\ffmpeg\x64-windows-dbg\libavcodec\avcodec.dll" (
-            echo Copying FFmpeg DLLs from buildtrees...
-            set FFMPEG_BUILDTREE=C:\vcpkg\buildtrees\ffmpeg\x64-windows-dbg
-            
-            REM Copy main DLLs
-            copy /Y "%FFMPEG_BUILDTREE%\libavcodec\avcodec.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            copy /Y "%FFMPEG_BUILDTREE%\libavformat\avformat.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            copy /Y "%FFMPEG_BUILDTREE%\libavutil\avutil.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            copy /Y "%FFMPEG_BUILDTREE%\libswresample\swresample.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            
-            REM Copy libx264 DLL (dependency of avcodec.dll)
-            if exist "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" (
-                copy /Y "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            ) else if exist "C:\vcpkg\buildtrees\x264\x64-windows-dbg\libx264-164.dll" (
-                copy /Y "C:\vcpkg\buildtrees\x264\x64-windows-dbg\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            )
-            
-            REM Copy all other DLLs from buildtree (dependencies)
-            for /r "%FFMPEG_BUILDTREE%" %%f in (*.dll) do (
-                copy /Y "%%f" "%BUILD_OUTPUT%\" >nul 2>&1
-            )
-            
-            if exist "%BUILD_OUTPUT%\avcodec.dll" (
-                echo FFmpeg DLLs copied successfully from buildtrees
-            ) else (
-                echo WARNING: Failed to copy FFmpeg DLLs from buildtrees
-                echo The module may fail to load at runtime
-                echo Please run fix_dlls.bat manually
-            )
-        ) else (
-            echo WARNING: FFmpeg DLLs not found in standard locations
-            echo The module may fail to load at runtime
-            echo Please run fix_dlls.bat manually or install FFmpeg via vcpkg
-        )
-    )
-) else (
+call :copy_ffmpeg_dlls
+
+if not exist "%BUILD_OUTPUT%\wasapi_capture.node" (
     echo ERROR: Compiled module not found at %BUILD_OUTPUT%\wasapi_capture.node
     pause
     exit /b 1
@@ -218,66 +161,9 @@ if errorlevel 1 (
 
 REM Copy FFmpeg DLLs to output directory (Electron build)
 echo [3/3] Copying FFmpeg DLLs to build output (Electron)...
-if exist "%BUILD_OUTPUT%\wasapi_capture.node" (
-    echo Module compiled successfully: %BUILD_OUTPUT%\wasapi_capture.node
-    
-    REM Try standard vcpkg bin directory first
-    if exist "%FFMPEG_BIN%\avcodec.dll" (
-        echo Copying FFmpeg DLLs from %FFMPEG_BIN%...
-        copy /Y "%FFMPEG_BIN%\avcodec.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-        copy /Y "%FFMPEG_BIN%\avformat.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-        copy /Y "%FFMPEG_BIN%\avutil.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-        copy /Y "%FFMPEG_BIN%\swresample.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-        
-        REM Copy libx264 DLL (dependency of avcodec.dll)
-        if exist "%FFMPEG_BIN%\libx264-164.dll" (
-            copy /Y "%FFMPEG_BIN%\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-        )
-        
-        if exist "%BUILD_OUTPUT%\avcodec.dll" (
-            echo FFmpeg DLLs copied successfully
-        ) else (
-            goto :try_buildtrees_electron
-        )
-    ) else (
-        :try_buildtrees_electron
-        REM If not found, try buildtrees (debug build)
-        if exist "C:\vcpkg\buildtrees\ffmpeg\x64-windows-dbg\libavcodec\avcodec.dll" (
-            echo Copying FFmpeg DLLs from buildtrees...
-            set FFMPEG_BUILDTREE=C:\vcpkg\buildtrees\ffmpeg\x64-windows-dbg
-            
-            REM Copy main DLLs
-            copy /Y "%FFMPEG_BUILDTREE%\libavcodec\avcodec.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            copy /Y "%FFMPEG_BUILDTREE%\libavformat\avformat.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            copy /Y "%FFMPEG_BUILDTREE%\libavutil\avutil.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            copy /Y "%FFMPEG_BUILDTREE%\libswresample\swresample.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            
-            REM Copy libx264 DLL (dependency of avcodec.dll)
-            if exist "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" (
-                copy /Y "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            ) else if exist "C:\vcpkg\buildtrees\x264\x64-windows-dbg\libx264-164.dll" (
-                copy /Y "C:\vcpkg\buildtrees\x264\x64-windows-dbg\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-            )
-            
-            REM Copy all other DLLs from buildtree (dependencies)
-            for /r "%FFMPEG_BUILDTREE%" %%f in (*.dll) do (
-                copy /Y "%%f" "%BUILD_OUTPUT%\" >nul 2>&1
-            )
-            
-            if exist "%BUILD_OUTPUT%\avcodec.dll" (
-                echo FFmpeg DLLs copied successfully from buildtrees
-            ) else (
-                echo WARNING: Failed to copy FFmpeg DLLs from buildtrees
-                echo The module may fail to load at runtime
-                echo Please run fix_dlls.bat manually
-            )
-        ) else (
-            echo WARNING: FFmpeg DLLs not found in standard locations
-            echo The module may fail to load at runtime
-            echo Please run fix_dlls.bat manually or install FFmpeg via vcpkg
-        )
-    )
-) else (
+call :copy_ffmpeg_dlls
+
+if not exist "%BUILD_OUTPUT%\wasapi_capture.node" (
     echo ERROR: Compiled module not found at %BUILD_OUTPUT%\wasapi_capture.node
     pause
     exit /b 1
@@ -292,13 +178,8 @@ echo Output: %BUILD_OUTPUT%\wasapi_capture.node
 echo Compiled for Electron 28.0.0
 echo.
 
-REM Run fix_dlls.bat to ensure all DLLs are copied
-if exist "%~dp0fix_dlls.bat" (
-    echo Running fix_dlls.bat to copy FFmpeg DLLs...
-    call "%~dp0fix_dlls.bat"
-) else (
-    echo WARNING: fix_dlls.bat not found, DLLs may be missing
-)
+REM Verify DLLs are present
+call :verify_dlls
 
 echo.
 echo ========================================
@@ -308,4 +189,202 @@ echo.
 echo Both Node.js and Electron builds are ready.
 echo.
 pause
+exit /b 0
 
+REM ========================================
+REM Function: Copy FFmpeg DLLs
+REM ========================================
+:copy_ffmpeg_dlls
+set FOUND=0
+
+REM Check vcpkg installed (preferred)
+if exist "%FFMPEG_BIN%\avcodec.dll" (
+    set FFMPEG_SOURCE=%FFMPEG_BIN%
+    set FOUND=1
+    goto :copy_from_source
+)
+
+REM Check vcpkg buildtrees (debug build) - DLLs are in separate subdirectories
+if exist "C:\vcpkg\buildtrees\ffmpeg\x64-windows-dbg\libavcodec\avcodec.dll" (
+    echo WARNING: Found debug DLLs in buildtrees (not recommended for production)
+    echo Location: C:\vcpkg\buildtrees\ffmpeg\x64-windows-dbg\
+    echo.
+    set FFMPEG_BUILDTREE=C:\vcpkg\buildtrees\ffmpeg\x64-windows-dbg
+    set FOUND=1
+    goto :copy_from_buildtree
+)
+
+REM Check if FFmpeg is in PATH
+where avcodec.dll >nul 2>&1
+if %errorlevel% == 0 (
+    for /f "delims=" %%i in ('where avcodec.dll') do (
+        set FFMPEG_SOURCE=%%~dpi
+        set FOUND=1
+        goto :copy_from_source
+    )
+)
+
+REM Check common FFmpeg installation locations
+if exist "C:\ffmpeg\bin\avcodec.dll" (
+    set FFMPEG_SOURCE=C:\ffmpeg\bin
+    set FOUND=1
+    goto :copy_from_source
+)
+
+if exist "C:\ffmpeg-dev\bin\avcodec.dll" (
+    set FFMPEG_SOURCE=C:\ffmpeg-dev\bin
+    set FOUND=1
+    goto :copy_from_source
+)
+
+REM If not found, show error
+if %FOUND% == 0 (
+    echo ERROR: FFmpeg DLLs not found!
+    echo.
+    echo Please install FFmpeg via vcpkg:
+    echo   1. cd C:\vcpkg
+    echo   2. .\vcpkg install ffmpeg[nonfree,x264]:x64-windows --recurse
+    echo   3. Run this script again
+    echo.
+    exit /b 1
+)
+
+:copy_from_source
+echo Found FFmpeg DLLs at: %FFMPEG_SOURCE%
+echo Copying DLLs to %BUILD_OUTPUT%...
+copy /Y "%FFMPEG_SOURCE%\avcodec.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Failed to copy avcodec.dll
+) else (
+    echo [OK] avcodec.dll
+)
+
+copy /Y "%FFMPEG_SOURCE%\avformat.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Failed to copy avformat.dll
+) else (
+    echo [OK] avformat.dll
+)
+
+copy /Y "%FFMPEG_SOURCE%\avutil.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Failed to copy avutil.dll
+) else (
+    echo [OK] avutil.dll
+)
+
+copy /Y "%FFMPEG_SOURCE%\swresample.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Failed to copy swresample.dll
+) else (
+    echo [OK] swresample.dll
+)
+
+REM Copy libx264 DLL (dependency of avcodec.dll)
+if exist "%FFMPEG_SOURCE%\libx264-164.dll" (
+    copy /Y "%FFMPEG_SOURCE%\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+    if errorlevel 1 (
+        echo WARNING: Failed to copy libx264-164.dll
+    ) else (
+        echo [OK] libx264-164.dll
+    )
+) else (
+    REM Try to find libx264 in vcpkg installed
+    if exist "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" (
+        copy /Y "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+        if not errorlevel 1 (
+            echo [OK] libx264-164.dll (from vcpkg installed)
+        )
+    )
+)
+goto :eof
+
+:copy_from_buildtree
+echo Found FFmpeg DLLs in buildtree: %FFMPEG_BUILDTREE%
+echo Copying DLLs from separate subdirectories...
+copy /Y "%FFMPEG_BUILDTREE%\libavcodec\avcodec.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Failed to copy avcodec.dll
+) else (
+    echo [OK] avcodec.dll
+)
+
+copy /Y "%FFMPEG_BUILDTREE%\libavformat\avformat.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Failed to copy avformat.dll
+) else (
+    echo [OK] avformat.dll
+)
+
+copy /Y "%FFMPEG_BUILDTREE%\libavutil\avutil.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Failed to copy avutil.dll
+) else (
+    echo [OK] avutil.dll
+)
+
+copy /Y "%FFMPEG_BUILDTREE%\libswresample\swresample.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Failed to copy swresample.dll
+) else (
+    echo [OK] swresample.dll
+)
+
+REM Copy libx264 DLL (dependency of avcodec.dll)
+if exist "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" (
+    copy /Y "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+    if not errorlevel 1 (
+        echo [OK] libx264-164.dll (from vcpkg installed)
+    )
+) else (
+    REM Try to find in buildtrees
+    if exist "C:\vcpkg\buildtrees\x264\x64-windows-dbg\libx264-164.dll" (
+        copy /Y "C:\vcpkg\buildtrees\x264\x64-windows-dbg\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
+        if not errorlevel 1 (
+            echo [OK] libx264-164.dll (from buildtrees)
+        )
+    )
+)
+
+REM Copy all other DLLs from buildtree (dependencies)
+echo.
+echo Copying additional dependencies...
+for /r "%FFMPEG_BUILDTREE%" %%f in (*.dll) do (
+    copy /Y "%%f" "%BUILD_OUTPUT%\" >nul 2>&1
+    if not errorlevel 1 (
+        echo [OK] %%~nxf
+    )
+)
+goto :eof
+
+REM ========================================
+REM Function: Verify DLLs
+REM ========================================
+:verify_dlls
+echo.
+echo Verifying copied DLLs...
+if exist "%BUILD_OUTPUT%\avcodec.dll" (
+    if exist "%BUILD_OUTPUT%\avformat.dll" (
+        if exist "%BUILD_OUTPUT%\avutil.dll" (
+            if exist "%BUILD_OUTPUT%\swresample.dll" (
+                echo.
+                echo ========================================
+                echo ✅ All DLLs copied successfully!
+                echo ========================================
+                echo.
+                echo DLLs in %BUILD_OUTPUT%:
+                dir /B "%BUILD_OUTPUT%\*.dll"
+                echo.
+            ) else (
+                echo ERROR: swresample.dll missing
+            )
+        ) else (
+            echo ERROR: avutil.dll missing
+        )
+    ) else (
+        echo ERROR: avformat.dll missing
+    )
+) else (
+    echo ERROR: avcodec.dll missing
+)
+goto :eof
