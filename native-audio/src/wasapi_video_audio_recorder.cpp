@@ -6,6 +6,8 @@
 #include "audio_engine.h"
 #include "audio_encoder.h"
 #include "encoded_audio_packet.h"
+#include <windows.h>
+#include <comdef.h>
 #include <memory>
 #include <thread>
 #include <atomic>
@@ -32,6 +34,7 @@ private:
     Napi::Value IsRunning(const Napi::CallbackInfo& info);
     Napi::Value GetCurrentPTSSeconds(const Napi::CallbackInfo& info);
     Napi::Value GetStatistics(const Napi::CallbackInfo& info);
+    Napi::Value GetCodecName(const Napi::CallbackInfo& info);
 
     // Internal
     void CaptureThread();
@@ -72,6 +75,9 @@ private:
     uint64_t m_videoFramesCaptured;
     uint64_t m_videoPacketsEncoded;
     uint64_t m_audioPacketsEncoded;
+
+    // COM initialization tracking
+    bool m_comInitialized;
 };
 
 Napi::FunctionReference VideoAudioRecorderAddon::constructor;
@@ -83,7 +89,8 @@ Napi::Object VideoAudioRecorderAddon::Init(Napi::Env env, Napi::Object exports) 
         InstanceMethod("stop", &VideoAudioRecorderAddon::Stop),
         InstanceMethod("isRunning", &VideoAudioRecorderAddon::IsRunning),
         InstanceMethod("getCurrentPTSSeconds", &VideoAudioRecorderAddon::GetCurrentPTSSeconds),
-        InstanceMethod("getStatistics", &VideoAudioRecorderAddon::GetStatistics)
+        InstanceMethod("getStatistics", &VideoAudioRecorderAddon::GetStatistics),
+        InstanceMethod("getCodecName", &VideoAudioRecorderAddon::GetCodecName)
     });
 
     constructor = Napi::Persistent(func);
@@ -108,11 +115,18 @@ VideoAudioRecorderAddon::VideoAudioRecorderAddon(const Napi::CallbackInfo& info)
     , m_videoFramesCaptured(0)
     , m_videoPacketsEncoded(0)
     , m_audioPacketsEncoded(0)
+    , m_comInitialized(false)
 {
 }
 
 VideoAudioRecorderAddon::~VideoAudioRecorderAddon() {
     Cleanup();
+    
+    // Uninitialize COM if we initialized it
+    if (m_comInitialized) {
+        CoUninitialize();
+        m_comInitialized = false;
+    }
 }
 
 Napi::Value VideoAudioRecorderAddon::Initialize(const Napi::CallbackInfo& info) {
@@ -145,6 +159,42 @@ Napi::Value VideoAudioRecorderAddon::Initialize(const Napi::CallbackInfo& info) 
         }
     }
 
+    // Check COM mode BEFORE trying to initialize it
+    // Try to initialize COM in MTA mode to detect current mode
+    // This is required for h264_mf codec (Media Foundation H.264 encoder)
+    // Electron runs in STA mode by default, but h264_mf requires MTA mode
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    bool comInSTAMode = false;
+    
+    if (hr == RPC_E_CHANGED_MODE) {
+        // COM is already initialized in STA mode (by Electron or test script)
+        // This means h264_mf will fail - we need to avoid it
+        comInSTAMode = true;
+        fprintf(stderr, "[VideoAudioRecorder] COM is in STA mode (RPC_E_CHANGED_MODE), h264_mf will be rejected\n");
+        fprintf(stderr, "[VideoAudioRecorder] Will try to use libx264 instead\n");
+        // Don't set m_comInitialized - we didn't initialize it
+    } else if (hr == S_FALSE) {
+        // COM was already initialized in MTA mode
+        fprintf(stderr, "[VideoAudioRecorder] COM already initialized in MTA mode\n");
+        fprintf(stderr, "[VideoAudioRecorder] WARNING: If testing STA mode, COM was not initialized in STA mode!\n");
+        comInSTAMode = false;
+        // Don't set m_comInitialized - we didn't initialize it
+    } else if (hr == S_OK) {
+        // We successfully initialized COM in MTA mode
+        // This should NOT happen if test script initialized COM in STA mode!
+        fprintf(stderr, "[VideoAudioRecorder] COM initialized in MTA mode\n");
+        fprintf(stderr, "[VideoAudioRecorder] WARNING: COM was not initialized in STA mode (test script may have failed)\n");
+        m_comInitialized = true;  // We initialized it, so we need to uninitialize it later
+        comInSTAMode = false;
+    } else {
+        // Some other error
+        fprintf(stderr, "[VideoAudioRecorder] COM initialization failed: 0x%08X\n", hr);
+        // Continue anyway - the video encoder will detect the mode
+    }
+    
+    // Store COM mode for reference - pass to video encoder
+    // This is critical: we check COM mode BEFORE AudioCapture can change it
+
     // Initialize Desktop Duplication
     m_desktopDupl = std::make_unique<DesktopDuplication>();
     if (!m_desktopDupl->Initialize()) {
@@ -154,9 +204,9 @@ Napi::Value VideoAudioRecorderAddon::Initialize(const Napi::CallbackInfo& info) 
 
     m_desktopDupl->GetDesktopDimensions(&m_width, &m_height);
 
-    // Initialize Video Encoder
+    // Initialize Video Encoder (pass COM mode information)
     m_videoEncoder = std::make_unique<VideoEncoder>();
-    if (!m_videoEncoder->Initialize(m_width, m_height, m_fps, m_videoBitrate, m_useNvenc)) {
+    if (!m_videoEncoder->Initialize(m_width, m_height, m_fps, m_videoBitrate, m_useNvenc, comInSTAMode)) {
         Napi::Error::New(env, "Failed to initialize Video Encoder").ThrowAsJavaScriptException();
         return env.Undefined();
     }
@@ -345,6 +395,17 @@ Napi::Value VideoAudioRecorderAddon::GetStatistics(const Napi::CallbackInfo& inf
     return stats;
 }
 
+Napi::Value VideoAudioRecorderAddon::GetCodecName(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    
+    if (!m_videoEncoder) {
+        return Napi::String::New(env, "not_initialized");
+    }
+    
+    std::string codecName = m_videoEncoder->GetCodecName();
+    return Napi::String::New(env, codecName);
+}
+
 void VideoAudioRecorderAddon::CaptureThread() {
     const uint32_t frameSize = m_width * m_height * 4; // RGBA
     std::vector<uint8_t> frameBuffer(frameSize);
@@ -415,6 +476,8 @@ void VideoAudioRecorderAddon::Cleanup() {
     m_audioCapture.reset();
     m_audioEngine.reset();
     m_audioEncoder.reset();
+    
+    // Note: COM uninitialization is handled in destructor
 }
 
 // Module initialization (exported for wasapi_capture.cpp)

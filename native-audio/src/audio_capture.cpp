@@ -68,13 +68,18 @@ AudioCapture::~AudioCapture() {
 bool AudioCapture::Initialize(AudioDataCallback callback, const char* captureMode) {
     // Initialize COM (if not already initialized)
     HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
-        // RPC_E_CHANGED_MODE means COM was already initialized with a different mode
-        // This is okay, we can still proceed
-        if (hr != S_FALSE) {  // S_FALSE means already initialized, which is fine
-            fprintf(stderr, "COM initialization failed: 0x%08X\n", hr);
-            return false;
-        }
+    if (hr == RPC_E_CHANGED_MODE) {
+        // COM is already initialized in STA mode - this is expected in Electron
+        fprintf(stderr, "[AudioCapture] COM already in STA mode (RPC_E_CHANGED_MODE) - continuing\n");
+    } else if (hr == S_FALSE) {
+        // COM was already initialized in MTA mode
+        fprintf(stderr, "[AudioCapture] COM already initialized in MTA mode\n");
+    } else if (hr == S_OK) {
+        // We successfully initialized COM in MTA mode
+        fprintf(stderr, "[AudioCapture] COM initialized in MTA mode\n");
+    } else if (FAILED(hr)) {
+        fprintf(stderr, "[AudioCapture] COM initialization failed: 0x%08X\n", hr);
+        return false;
     }
     m_comInitialized = (hr == S_OK);  // Only uninitialize if we initialized it
     

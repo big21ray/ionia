@@ -52,7 +52,10 @@ module.exports = {
   AudioEngine: nativeModule.AudioEngine,
   AudioEngineEncoder: nativeModule.AudioEngineEncoder,
   VideoRecorder: nativeModule.VideoRecorder || null,  // May not be available if not compiled
-  VideoAudioRecorder: nativeModule.VideoAudioRecorder || null  // May not be available if not compiled
+  VideoAudioRecorder: nativeModule.VideoAudioRecorder || null,  // May not be available if not compiled
+  // Utility functions for testing COM mode
+  initializeCOMInSTAMode: nativeModule.initializeCOMInSTAMode || null,
+  checkCOMMode: nativeModule.checkCOMMode || null
 };
 
 

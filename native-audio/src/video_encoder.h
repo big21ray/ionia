@@ -34,8 +34,9 @@ public:
     // fps: frames per second (e.g., 30)
     // bitrate: bitrate in bits per second (e.g., 5000000 for 5 Mbps)
     // useNvenc: true to use NVENC (if available), false for x264
+    // comInSTAMode: true if COM is in STA mode (h264_mf will be rejected)
     // Returns: true if successful
-    bool Initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, bool useNvenc = true);
+    bool Initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, bool useNvenc = true, bool comInSTAMode = false);
 
     // Encode a frame
     // frameData: RGBA32 frame data (width * height * 4 bytes)
@@ -81,7 +82,7 @@ private:
     uint64_t m_totalBytes;
     
     // Helper methods
-    bool InitializeCodec(bool useNvenc);
+    bool InitializeCodec(bool useNvenc, bool comInSTAMode = false);
     bool AllocateFrame();
     void ConvertRGBAtoYUV(const uint8_t* rgbaData, AVFrame* frame);
 };

@@ -1,5 +1,7 @@
 #include <napi.h>
 #include "audio_capture.h"
+#include <windows.h>
+#include <comdef.h>
 #include <vector>
 #include <memory>
 #include <mutex>
@@ -233,12 +235,78 @@ Napi::Object AudioEngineEncoderAddon_Init(Napi::Env env, Napi::Object exports);
 extern Napi::Object VideoRecorderInit(Napi::Env env, Napi::Object exports);
 extern Napi::Object VideoAudioRecorderInit(Napi::Env env, Napi::Object exports);
 
+// Helper function to check COM mode
+Napi::Value CheckCOMMode(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    
+    // Try to initialize COM in MTA mode to detect current mode
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    
+    if (hr == RPC_E_CHANGED_MODE) {
+        // COM is in STA mode
+        if (hr == S_OK) {
+            CoUninitialize();  // Clean up
+        }
+        return Napi::String::New(env, "STA");
+    } else if (hr == S_FALSE || hr == S_OK) {
+        // COM is in MTA mode (or was just initialized in MTA mode)
+        if (hr == S_OK) {
+            CoUninitialize();  // Clean up
+        }
+        return Napi::String::New(env, "MTA");
+    } else {
+        return Napi::String::New(env, "UNKNOWN");
+    }
+}
+
+// Helper function to initialize COM in STA mode (for testing Electron-like behavior)
+// Note: COM initialization persists for the lifetime of the process/thread
+Napi::Value InitializeCOMInSTAMode(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    
+    // Initialize COM in STA mode (like Electron does)
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    
+    if (hr == S_OK) {
+        fprintf(stderr, "[COM] Successfully initialized COM in STA mode (for testing)\n");
+        fprintf(stderr, "[COM] COM will remain in STA mode for this thread/process\n");
+        return Napi::Boolean::New(env, true);
+    } else if (hr == S_FALSE) {
+        // COM was already initialized - check if it's in STA mode
+        fprintf(stderr, "[COM] COM already initialized - checking mode...\n");
+        // Try to initialize in MTA mode to see if we get RPC_E_CHANGED_MODE
+        HRESULT testHr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+        if (testHr == RPC_E_CHANGED_MODE) {
+            fprintf(stderr, "[COM] COM is already in STA mode (good!)\n");
+            return Napi::Boolean::New(env, true);
+        } else {
+            if (testHr == S_OK) {
+                CoUninitialize();  // Clean up test initialization
+            }
+            fprintf(stderr, "[COM] COM is NOT in STA mode (may be in MTA mode)\n");
+            return Napi::Boolean::New(env, false);
+        }
+    } else if (hr == RPC_E_CHANGED_MODE) {
+        fprintf(stderr, "[COM] COM already initialized in different mode (MTA)\n");
+        fprintf(stderr, "[COM] Cannot change to STA mode - test will not work correctly\n");
+        return Napi::Boolean::New(env, false);
+    } else {
+        fprintf(stderr, "[COM] Failed to initialize COM in STA mode: 0x%08X\n", hr);
+        return Napi::Boolean::New(env, false);
+    }
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
     WASAPICaptureAddon::Init(env, exports);
     AudioEngineAddon_Init(env, exports);
     AudioEngineEncoderAddon_Init(env, exports);
     VideoRecorderInit(env, exports);
     VideoAudioRecorderInit(env, exports);
+    
+    // Add utility functions for testing COM STA mode
+    exports.Set("initializeCOMInSTAMode", Napi::Function::New(env, InitializeCOMInSTAMode));
+    exports.Set("checkCOMMode", Napi::Function::New(env, CheckCOMMode));
+    
     return exports;
 }
 

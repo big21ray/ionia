@@ -5,6 +5,8 @@ extern "C" {
 #include <libavutil/imgutils.h>
 }
 
+#include <windows.h>
+#include <comdef.h>
 #include <cstring>
 #include <cstdio>
 
@@ -29,7 +31,7 @@ VideoEncoder::~VideoEncoder() {
     Cleanup();
 }
 
-bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, bool useNvenc) {
+bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, bool useNvenc, bool comInSTAMode) {
     if (m_initialized) {
         return false;
     }
@@ -40,8 +42,8 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps, uin
     m_bitrate = bitrate;
     m_useNvenc = useNvenc;
 
-    // Initialize codec
-    if (!InitializeCodec(useNvenc)) {
+    // Initialize codec (pass COM mode information)
+    if (!InitializeCodec(useNvenc, comInSTAMode)) {
         fprintf(stderr, "[VideoEncoder] Failed to initialize codec\n");
         return false;
     }
@@ -59,26 +61,120 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps, uin
     return true;
 }
 
-bool VideoEncoder::InitializeCodec(bool useNvenc) {
+// Helper function to check if COM is in STA mode
+// Returns true if COM is in STA mode (or can't be changed to MTA), false otherwise
+// This function checks if we can initialize COM in MTA mode without getting RPC_E_CHANGED_MODE
+static bool IsCOMInSTAMode() {
+    // Try to initialize COM in MTA mode
+    // If COM is already initialized in STA mode, this will return RPC_E_CHANGED_MODE
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    
+    if (hr == RPC_E_CHANGED_MODE) {
+        // COM is already initialized in STA mode - we can't change it
+        fprintf(stderr, "[VideoEncoder] COM mode check: STA mode detected (RPC_E_CHANGED_MODE)\n");
+        return true;
+    }
+    
+    // If we successfully initialized COM (S_OK), uninitialize it
+    // If COM was already initialized in MTA mode (S_FALSE), we don't need to uninitialize
+    if (hr == S_OK) {
+        CoUninitialize();
+        fprintf(stderr, "[VideoEncoder] COM mode check: MTA mode (initialized successfully)\n");
+    } else if (hr == S_FALSE) {
+        fprintf(stderr, "[VideoEncoder] COM mode check: MTA mode (already initialized)\n");
+    }
+    
+    // COM is in MTA mode (or can be initialized in MTA mode)
+    return false;
+}
+
+bool VideoEncoder::InitializeCodec(bool useNvenc, bool comInSTAMode) {
+    // Use the provided COM mode information (checked before AudioCapture could change it)
+    if (comInSTAMode) {
+        fprintf(stderr, "[VideoEncoder] COM is in STA mode (passed from VideoAudioRecorder) - will avoid h264_mf codec\n");
+    } else {
+        // Double-check COM mode in case it wasn't passed correctly
+        fprintf(stderr, "[VideoEncoder] Checking COM mode (fallback check)...\n");
+        bool detectedSTAMode = IsCOMInSTAMode();
+        if (detectedSTAMode) {
+            fprintf(stderr, "[VideoEncoder] WARNING: COM detected as STA mode (but was passed as MTA) - using STA mode\n");
+            comInSTAMode = true;
+        } else {
+            fprintf(stderr, "[VideoEncoder] COM is in MTA mode - h264_mf can be used\n");
+        }
+    }
+    
     // Try NVENC first if requested
+    // NVENC = NVIDIA hardware encoder (requires NVIDIA GPU with NVENC support)
     if (useNvenc) {
         m_codec = avcodec_find_encoder_by_name("h264_nvenc");
         if (m_codec) {
-            fprintf(stderr, "[VideoEncoder] Using NVENC encoder\n");
+            fprintf(stderr, "[VideoEncoder] Using NVENC encoder (NVIDIA hardware acceleration)\n");
         } else {
-            fprintf(stderr, "[VideoEncoder] NVENC not available, falling back to x264\n");
+            fprintf(stderr, "[VideoEncoder] NVENC not available (no NVIDIA GPU or drivers), falling back to x264\n");
             useNvenc = false;
         }
     }
 
-    // Fallback to x264
+    // Fallback to libx264 (explicitly request libx264 to avoid h264_mf COM threading issues)
     if (!m_codec) {
-        m_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
-        if (!m_codec) {
-            fprintf(stderr, "[VideoEncoder] H.264 encoder not found\n");
-            return false;
+        // Try multiple x264 codec names (different FFmpeg builds use different names)
+        const char* x264_names[] = {
+            "libx264",      // Standard name
+            "x264",         // Alternative name
+            "libx264rgb",   // RGB variant
+            nullptr
+        };
+        
+        for (int i = 0; x264_names[i] != nullptr; i++) {
+            m_codec = avcodec_find_encoder_by_name(x264_names[i]);
+            if (m_codec) {
+                fprintf(stderr, "[VideoEncoder] Using %s encoder\n", x264_names[i]);
+                break;
+            }
         }
-        fprintf(stderr, "[VideoEncoder] Using x264 encoder\n");
+        
+        // If x264 not found, try generic H.264 but check for h264_mf
+        if (!m_codec) {
+            fprintf(stderr, "[VideoEncoder] x264 encoders not found, trying generic H.264...\n");
+            m_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
+            if (!m_codec) {
+                fprintf(stderr, "[VideoEncoder] H.264 encoder not found\n");
+                return false;
+            }
+            
+            // Check if we got h264_mf (which will fail in Electron STA mode)
+            if (m_codec && strstr(m_codec->name, "mf") != nullptr) {
+                if (comInSTAMode) {
+                    // COM is in STA mode and we got h264_mf - this will fail, so reject it
+                    fprintf(stderr, "[VideoEncoder] ERROR: Found h264_mf but COM is in STA mode!\n");
+                    fprintf(stderr, "[VideoEncoder] h264_mf requires MTA mode and cannot be used in Electron.\n");
+                    fprintf(stderr, "[VideoEncoder] \n");
+                    fprintf(stderr, "[VideoEncoder] SOLUTION: Install FFmpeg with libx264 support\n");
+                    fprintf(stderr, "[VideoEncoder] \n");
+                    fprintf(stderr, "[VideoEncoder] Option 1 - Using vcpkg (recommended):\n");
+                    fprintf(stderr, "[VideoEncoder]   cd C:\\vcpkg\n");
+                    fprintf(stderr, "[VideoEncoder]   .\\vcpkg install ffmpeg[nonfree]:x64-windows\n");
+                    fprintf(stderr, "[VideoEncoder]   (libx264 is included in nonfree variant)\n");
+                    fprintf(stderr, "[VideoEncoder] \n");
+                    fprintf(stderr, "[VideoEncoder] Option 2 - Download pre-built FFmpeg:\n");
+                    fprintf(stderr, "[VideoEncoder]   Download from https://www.gyan.dev/ffmpeg/builds/\n");
+                    fprintf(stderr, "[VideoEncoder]   Make sure it includes libx264 (check with: ffmpeg -encoders | findstr x264)\n");
+                    fprintf(stderr, "[VideoEncoder]   Copy the DLLs to native-audio/build/Release/\n");
+                    fprintf(stderr, "[VideoEncoder] \n");
+                    fprintf(stderr, "[VideoEncoder] After installing, rebuild the native module:\n");
+                    fprintf(stderr, "[VideoEncoder]   cd native-audio\n");
+                    fprintf(stderr, "[VideoEncoder]   npm run build\n");
+                    m_codec = nullptr;
+                    return false;
+                } else {
+                    // COM is in MTA mode, h264_mf should work
+                    fprintf(stderr, "[VideoEncoder] Using h264_mf encoder (COM is in MTA mode)\n");
+                }
+            } else {
+                fprintf(stderr, "[VideoEncoder] Using generic H.264 encoder: %s\n", m_codec ? m_codec->name : "unknown");
+            }
+        }
     }
 
     // Allocate codec context

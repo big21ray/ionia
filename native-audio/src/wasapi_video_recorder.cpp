@@ -2,6 +2,8 @@
 #include "desktop_duplication.h"
 #include "video_encoder.h"
 #include "video_muxer.h"
+#include <windows.h>
+#include <comdef.h>
 #include <memory>
 #include <thread>
 #include <atomic>
@@ -130,8 +132,15 @@ Napi::Value VideoRecorderAddon::Initialize(const Napi::CallbackInfo& info) {
     m_desktopDupl->GetDesktopDimensions(&m_width, &m_height);
 
     // Initialize Video Encoder
+    // Check COM mode first (like VideoAudioRecorder does)
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    bool comInSTAMode = (hr == RPC_E_CHANGED_MODE);
+    if (hr == S_OK) {
+        CoUninitialize();  // We initialized it, so uninitialize it
+    }
+    
     m_videoEncoder = std::make_unique<VideoEncoder>();
-    if (!m_videoEncoder->Initialize(m_width, m_height, m_fps, m_videoBitrate, m_useNvenc)) {
+    if (!m_videoEncoder->Initialize(m_width, m_height, m_fps, m_videoBitrate, m_useNvenc, comInSTAMode)) {
         Napi::Error::New(env, "Failed to initialize Video Encoder").ThrowAsJavaScriptException();
         return env.Undefined();
     }
