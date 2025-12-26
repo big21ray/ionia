@@ -254,20 +254,35 @@ void VideoAudioStreamerAddon::CaptureThread() {
     }
     
     std::vector<uint8_t> frame(m_width * m_height * 4);
+    
+    // Frame pacing: only capture when it's time for the next frame
+    // This matches OBS and VideoAudioRecorder approach
+    auto startTime = std::chrono::high_resolution_clock::now();
+    uint64_t frameNumber = 0;
+    const int64_t frameIntervalNs = static_cast<int64_t>(1000000000.0 / m_fps);  // ns per frame @ m_fps
 
     while (!m_shouldStop) {
-        uint32_t w, h;
-        int64_t ts;
-        if (m_desktop->CaptureFrame(frame.data(), &w, &h, &ts)) {
-            auto packets = m_videoEncoder->EncodeFrame(frame.data());
-            uint64_t frameNum = m_videoFrames.load();
-            for (auto& p : packets) {
-                if (m_streamMuxer->WriteVideoPacket(&p, frameNum))
-                    m_videoPackets.fetch_add(1);
+        auto currentTime = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(currentTime - startTime).count();
+        int64_t expectedFrame = elapsed / frameIntervalNs;
+
+        if (frameNumber < expectedFrame) {
+            // Try to capture frame
+            uint32_t w, h;
+            int64_t ts;
+            if (m_desktop->CaptureFrame(frame.data(), &w, &h, &ts)) {
+                auto packets = m_videoEncoder->EncodeFrame(frame.data());
+                for (auto& p : packets) {
+                    if (m_streamMuxer->WriteVideoPacket(&p, frameNumber))
+                        m_videoPackets.fetch_add(1);
+                }
+                m_videoFrames.fetch_add(1);
+                frameNumber++;
             }
-            m_videoFrames.fetch_add(1);
+        } else {
+            // Wait a bit to avoid busy waiting
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 }
 

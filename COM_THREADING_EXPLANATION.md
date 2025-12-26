@@ -98,3 +98,5 @@ m_codec = avcodec_find_encoder_by_name("libx264");
 The fix ensures we use `libx264` which doesn't depend on COM threading mode, making it work in both environments.
 
 
+
+

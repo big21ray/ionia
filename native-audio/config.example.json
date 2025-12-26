@@ -1,0 +1,7 @@
+{
+  "rtmpUrl": "rtmp://a.rtmp.youtube.com/live2/VOTRE_STREAM_KEY",
+  "comment": "Copiez ce fichier en config.json et remplacez VOTRE_STREAM_KEY par votre vraie clé. config.json est dans .gitignore et ne sera jamais commité."
+}
+
+
+

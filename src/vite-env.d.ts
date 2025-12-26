@@ -15,6 +15,16 @@ interface ElectronAPI {
     outputPath?: string;
     error?: string;
   }>;
+  startStream: (rtmpUrl: string) => Promise<{
+    success: boolean;
+    rtmpUrl?: string;
+    error?: string;
+  }>;
+  stopStream: () => Promise<{
+    success: boolean;
+    rtmpUrl?: string;
+    error?: string;
+  }>;
 }
 
 interface Window {

@@ -16,8 +16,11 @@
         "src/desktop_duplication.cpp",
         "src/video_encoder.cpp",
         "src/video_muxer.cpp",
+        "src/stream_muxer.cpp",
+        "src/stream_buffer.cpp",
         "src/wasapi_video_recorder.cpp",
-        "src/wasapi_video_audio_recorder.cpp"
+        "src/wasapi_video_audio_recorder.cpp",
+        "src/wasapi_video_audio_streamer.cpp"
       ],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",

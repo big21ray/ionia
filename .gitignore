@@ -118,3 +118,8 @@ node_modules
 # Development startup scripts (use npm run electron:dev instead)
 start-dev.bat
 start-dev.ps1
+
+# Configuration files with sensitive data (RTMP keys, API keys, etc.)
+native-audio/config.json
+config.json
+*.config.json

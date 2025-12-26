@@ -79,11 +79,16 @@ bool AudioEngineWithEncoder::Initialize(const std::string& outputPath, UINT32 bi
             // Mux encoded packets into MP4
             // AudioMuxer still uses AudioPacket, so we need to create one with timestamps
             // For audio_engine_encoder, we use AudioEngine PTS
+            // AAC typically has 1024 samples per frame
+            const int64_t aacSamplesPerFrame = 1024;
+            int64_t currentPts = ptsFrames;
+            
             for (const EncodedAudioPacket& encodedPacket : encodedPackets) {
                 // Create AudioPacket with PTS from AudioEngine
-                // AudioMuxer will handle the timestamps
-                AudioPacket audioPacket(encodedPacket.data, ptsFrames, ptsFrames, numFrames, 0);
+                // Each encoded packet represents aacSamplesPerFrame samples
+                AudioPacket audioPacket(encodedPacket.data, currentPts, currentPts, aacSamplesPerFrame, 0);
                 m_muxer->WritePacket(audioPacket);
+                currentPts += aacSamplesPerFrame;
             }
         }
     };

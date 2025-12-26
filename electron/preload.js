@@ -6,6 +6,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFileDialog: () => ipcRenderer.invoke('dialog:openFile'),
   startRecording: () => ipcRenderer.invoke('recording:start'),
   stopRecording: () => ipcRenderer.invoke('recording:stop'),
+  startStream: (rtmpUrl) => ipcRenderer.invoke('stream:start', rtmpUrl),
+  stopStream: () => ipcRenderer.invoke('stream:stop'),
 });
 
 

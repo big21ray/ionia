@@ -51,6 +51,10 @@ try {
 let videoAudioRecorder: any = null;
 let recordingOutputPath: string | null = null;
 
+// Streaming state
+let videoAudioStreamer: any = null;
+let streamingRtmpUrl: string | null = null;
+
 
 const createWindow = () => {
   // Create the browser window
@@ -261,6 +265,87 @@ const createWindow = () => {
       console.error('❌ Error during recording stop:', error);
       videoAudioRecorder = null;
       recordingOutputPath = null;
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  // Handle streaming start
+  ipcMain.handle('stream:start', async (event, rtmpUrl: string) => {
+    if (videoAudioStreamer) {
+      return { success: false, error: 'Streaming already in progress' };
+    }
+
+    if (videoAudioRecorder) {
+      return { success: false, error: 'Recording in progress. Stop recording before starting stream.' };
+    }
+
+    if (!VideoAudioRecorder) {
+      return { success: false, error: 'VideoAudioRecorder not available. Make sure the native module is compiled.' };
+    }
+
+    if (!rtmpUrl || rtmpUrl.trim() === '') {
+      return { success: false, error: 'RTMP URL is required' };
+    }
+
+    try {
+      streamingRtmpUrl = rtmpUrl.trim();
+      console.log('📡 Starting stream to:', streamingRtmpUrl);
+
+      // TODO: Create VideoAudioStreamer wrapper that uses StreamMuxer instead of VideoMuxer
+      // For now, return an error indicating it's not yet implemented
+      return { 
+        success: false, 
+        error: 'Streaming not yet implemented. StreamMuxer C++ class is ready, but N-API wrapper needs to be created.' 
+      };
+
+      // Future implementation will look like:
+      // videoAudioStreamer = new VideoAudioRecorder();
+      // const initialized = videoAudioStreamer.initializeStream(streamingRtmpUrl, 30, 5000000, true, 192000, 'both');
+      // if (!initialized) {
+      //   streamingRtmpUrl = null;
+      //   return { success: false, error: 'Failed to initialize stream' };
+      // }
+      // const started = videoAudioStreamer.start();
+      // if (!started) {
+      //   streamingRtmpUrl = null;
+      //   return { success: false, error: 'Failed to start stream' };
+      // }
+      // return { success: true, rtmpUrl: streamingRtmpUrl };
+    } catch (error) {
+      console.error('❌ Error during stream start:', error);
+      videoAudioStreamer = null;
+      streamingRtmpUrl = null;
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  // Handle streaming stop
+  ipcMain.handle('stream:stop', async () => {
+    if (!videoAudioStreamer) {
+      return { success: false, error: 'No streaming in progress' };
+    }
+
+    try {
+      const streamerToStop = videoAudioStreamer;
+      const rtmpUrl = streamingRtmpUrl;
+      
+      console.log('⏹️  Stopping stream...');
+      
+      // TODO: Implement stop for streaming
+      // const stopped = streamerToStop.stop();
+      // if (!stopped) {
+      //   return { success: false, error: 'Failed to stop stream' };
+      // }
+      
+      videoAudioStreamer = null;
+      streamingRtmpUrl = null;
+      
+      console.log('✅ Stream stopped');
+      return { success: true, rtmpUrl };
+    } catch (error) {
+      console.error('❌ Error during stream stop:', error);
+      videoAudioStreamer = null;
+      streamingRtmpUrl = null;
       return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
     }
   });

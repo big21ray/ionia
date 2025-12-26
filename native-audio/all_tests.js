@@ -15,12 +15,12 @@ const fs = require('fs');
 const nativeModule = require('./index.js');
 
 // ============================================================================
-// SECTION 1: test_video_audio_recorder.js (COMMENTED - Use SECTION 6 for streaming)
+// SECTION 1: test_video_audio_recorder.js (ACTIVE)
 // ============================================================================
 // Test script to record 10 seconds of screen + audio using VideoAudioRecorder
 // This version initializes COM in STA mode (like Electron) to test COM threading behavior
 // ============================================================================
-/*
+
 async function testVideoAudioRecorder() {
     console.log('🎬 Starting video + audio recorder test (STA mode - Electron-like)...\n');
     console.log('📋 Note: Detailed codec selection messages appear in stderr (look for [VideoEncoder] messages)\n');
@@ -151,7 +151,6 @@ testVideoAudioRecorder().catch(error => {
     console.error('❌ Fatal error:', error);
     process.exit(1);
 });
-*/
 
 // ============================================================================
 // SECTION 2: test_video_recorder.js (COMMENTED)
@@ -414,12 +413,13 @@ setTimeout(() => {
 // ============================================================================
 
 // ============================================================================
-// SECTION 6: test_video_audio_streamer.js (ACTIVE - STREAMING TEST)
+// SECTION 6: test_video_audio_streamer.js (COMMENTED - STREAMING TEST)
 // ============================================================================
 // Test script to stream video + audio to RTMP server using VideoAudioStreamer
 // This tests the streaming functionality with backpressure and reconnect handling
 // ============================================================================
 
+/* COMMENTED OUT - STREAMING TEST NOT NEEDED RIGHT NOW
 // async function testVideoAudioStreamer() {
 //     console.log('📡 Starting video + audio streamer test (RTMP streaming)...\n');
 //     console.log('📋 Note: This test requires a valid RTMP URL (e.g., Twitch, YouTube Live)\n');
@@ -636,7 +636,7 @@ process.stdin.resume();
 // });
 
 // ============================================================================
-// SECTION 6: test_video_audio_streamer.js (ACTIVE - STREAMING TEST)
+// SECTION 6: test_video_audio_streamer.js (COMMENTED - STREAMING TEST)
 // OBS-style RTMP validation test
 // ============================================================================
 
@@ -768,6 +768,7 @@ testVideoAudioStreamer().catch(err => {
     console.error(err);
     process.exit(1);
 });
+*/  // END COMMENTED OUT SECTION 6
 
 // ============================================================================
 // NOTE: Additional debug scripts (debug_audio_*.js, debug_wasapi_*.js, etc.)

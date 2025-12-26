@@ -14,6 +14,7 @@ extern Napi::Object AudioEngineAddon_Init(Napi::Env env, Napi::Object exports);
 extern Napi::Object AudioEngineEncoderAddon_Init(Napi::Env env, Napi::Object exports);
 extern Napi::Object VideoRecorderInit(Napi::Env env, Napi::Object exports);
 extern Napi::Object VideoAudioRecorderInit(Napi::Env env, Napi::Object exports);
+extern Napi::Object VideoAudioStreamerInit(Napi::Env env, Napi::Object exports);
 
 // Structure to hold audio data and size for thread-safe callback
 struct AudioData {
@@ -234,6 +235,7 @@ Napi::Object AudioEngineAddon_Init(Napi::Env env, Napi::Object exports);
 Napi::Object AudioEngineEncoderAddon_Init(Napi::Env env, Napi::Object exports);
 extern Napi::Object VideoRecorderInit(Napi::Env env, Napi::Object exports);
 extern Napi::Object VideoAudioRecorderInit(Napi::Env env, Napi::Object exports);
+extern Napi::Object VideoAudioStreamerInit(Napi::Env env, Napi::Object exports);
 
 // Helper function to check COM mode
 Napi::Value CheckCOMMode(const Napi::CallbackInfo& info) {
@@ -302,6 +304,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     AudioEngineEncoderAddon_Init(env, exports);
     VideoRecorderInit(env, exports);
     VideoAudioRecorderInit(env, exports);
+    VideoAudioStreamerInit(env, exports);
     
     // Add utility functions for testing COM STA mode
     exports.Set("initializeCOMInSTAMode", Napi::Function::New(env, InitializeCOMInSTAMode));

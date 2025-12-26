@@ -153,8 +153,8 @@ bool AudioMuxer::WritePacket(const AudioPacket& packet) {
     avPacket->duration = packet.duration;
     avPacket->stream_index = m_audioStream->index;
 
-    // Rescale timestamps to stream time base
-    av_packet_rescale_ts(avPacket, m_codecContext->time_base, m_audioStream->time_base);
+    // NO rescale needed: codec time_base and stream time_base are the same (1/sampleRate)
+    // av_packet_rescale_ts would be a no-op and might introduce floating point errors
 
     // Write packet
     ret = av_interleaved_write_frame(m_formatContext, avPacket);
