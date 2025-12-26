@@ -8,18 +8,19 @@
 
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+// Note: We use ONLY FFmpeg libraries (libavcodec, libavformat, etc.) via native C++ code
+// We do NOT use the ffmpeg.exe executable
 
 // Load the native module
 const nativeModule = require('./index.js');
 
 // ============================================================================
-// SECTION 1: test_video_audio_recorder.js (ACTIVE - DEFAULT)
+// SECTION 1: test_video_audio_recorder.js (COMMENTED - Use SECTION 6 for streaming)
 // ============================================================================
 // Test script to record 10 seconds of screen + audio using VideoAudioRecorder
 // This version initializes COM in STA mode (like Electron) to test COM threading behavior
 // ============================================================================
-
+/*
 async function testVideoAudioRecorder() {
     console.log('🎬 Starting video + audio recorder test (STA mode - Electron-like)...\n');
     console.log('📋 Note: Detailed codec selection messages appear in stderr (look for [VideoEncoder] messages)\n');
@@ -150,6 +151,7 @@ testVideoAudioRecorder().catch(error => {
     console.error('❌ Fatal error:', error);
     process.exit(1);
 });
+*/
 
 // ============================================================================
 // SECTION 2: test_video_recorder.js (COMMENTED)
@@ -236,74 +238,11 @@ testVideoRecorder().catch(error => {
 */
 
 // ============================================================================
-// SECTION 3: test_duration.js (COMMENTED)
+// SECTION 3: REMOVED - test_duration.js
 // ============================================================================
-// Quick test script to verify video duration using ffprobe
+// This section was removed because it used the ffprobe.exe executable via spawn()
+// We use ONLY FFmpeg libraries (libavcodec, libavformat, etc.) via native C++ code
 // ============================================================================
-/*
-const videoPath = path.join(__dirname, 'test_video_recording.mp4');
-
-if (!fs.existsSync(videoPath)) {
-    console.error(`❌ Video file not found: ${videoPath}`);
-    console.error('   Please run test_video_recorder.js first to create the video file.');
-    process.exit(1);
-}
-
-console.log('🔍 Checking video duration with ffprobe...\n');
-console.log(`📁 File: ${videoPath}\n`);
-
-const ffprobe = spawn('ffprobe', [
-    '-v', 'error',
-    '-show_entries', 'format=duration:stream=duration',
-    '-of', 'default=noprint_wrappers=1:nokey=1',
-    videoPath
-], {
-    stdio: ['pipe', 'pipe', 'pipe'],
-    windowsHide: true
-});
-
-let output = '';
-let errorOutput = '';
-
-ffprobe.stdout.on('data', (data) => {
-    output += data.toString();
-});
-
-ffprobe.stderr.on('data', (data) => {
-    errorOutput += data.toString();
-});
-
-ffprobe.on('close', (code) => {
-    if (code !== 0) {
-        console.error('❌ ffprobe failed:', errorOutput);
-        process.exit(1);
-    }
-    
-    const durations = output.trim().split('\n').filter(line => line.trim() !== '');
-    const formatDuration = parseFloat(durations[0] || durations[durations.length - 1]);
-    
-    console.log('📊 Duration Results:');
-    console.log(`   Format duration: ${formatDuration.toFixed(3)} seconds`);
-    console.log(`   Expected: ~10.000 seconds (10 seconds recording)`);
-    console.log(`   Difference: ${Math.abs(formatDuration - 10.0).toFixed(3)} seconds\n`);
-    
-    if (Math.abs(formatDuration - 10.0) < 0.5) {
-        console.log('✅ Duration is correct! (within 0.5s tolerance)');
-    } else {
-        console.log('❌ Duration is incorrect!');
-    }
-    
-    const stats = fs.statSync(videoPath);
-    console.log(`\n📦 File size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
-    
-    process.exit(0);
-});
-
-ffprobe.on('error', (error) => {
-    console.error('❌ Failed to run ffprobe:', error.message);
-    process.exit(1);
-});
-*/
 
 // ============================================================================
 // SECTION 4: debug_video_recorder.js (COMMENTED)
@@ -468,291 +407,367 @@ setTimeout(() => {
 */
 
 // ============================================================================
-// SECTION 5: debug_record_ffmpeg.js (COMMENTED)
+// SECTION 5: REMOVED - debug_record_ffmpeg.js
 // ============================================================================
-// FFmpeg recording test with WASAPI audio capture
+// This section was removed because it used the ffmpeg.exe executable via spawn()
+// We use ONLY FFmpeg libraries (libavcodec, libavformat, etc.) via native C++ code
 // ============================================================================
-/*
-const WASAPICapture = nativeModule.WASAPICapture;
 
-let desktopChunks = [];
-let micChunks = [];
-let desktopFormat = null;
-let micFormat = null;
-let desktopCallbackCount = 0;
-let micCallbackCount = 0;
+// ============================================================================
+// SECTION 6: test_video_audio_streamer.js (ACTIVE - STREAMING TEST)
+// ============================================================================
+// Test script to stream video + audio to RTMP server using VideoAudioStreamer
+// This tests the streaming functionality with backpressure and reconnect handling
+// ============================================================================
 
-let ffmpegProcess = null;
+// async function testVideoAudioStreamer() {
+//     console.log('📡 Starting video + audio streamer test (RTMP streaming)...\n');
+//     console.log('📋 Note: This test requires a valid RTMP URL (e.g., Twitch, YouTube Live)\n');
+//     
+//     if (!nativeModule.VideoAudioStreamer) {
+//         console.error('❌ VideoAudioStreamer not available. Make sure the native module is compiled with streaming support.');
+//         process.exit(1);
+//     }
+//
+//     const VideoAudioStreamer = nativeModule.VideoAudioStreamer;
+//     
+//     // Initialize COM in STA mode (like Electron does)
+//     if (nativeModule.initializeCOMInSTAMode) {
+//         console.log('🔧 Initializing COM in STA mode (simulating Electron environment)...');
+//         const comInitialized = nativeModule.initializeCOMInSTAMode();
+//         if (!comInitialized) {
+//             console.error('❌ Failed to initialize COM in STA mode, or COM already in different mode');
+//             process.exit(1);
+//         } else {
+//             console.log('✅ COM initialized in STA mode (Electron-like)\n');
+//         }
+//     } else {
+//         console.error('❌ initializeCOMInSTAMode function not available');
+//         process.exit(1);
+//     }
+//
+//     // RTMP URL - LECTURE SÉCURISÉE (jamais commitée dans Git)
+//     // Option 1: Fichier config.json (recommandé - dans .gitignore)
+//     // let rtmpUrl = null;
+//     // try {
+//     //     const configPath = path.join(__dirname, 'config.json');
+//     //     if (fs.existsSync(configPath)) {
+//     //         const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+//     //         rtmpUrl = config.rtmpUrl;
+//     //         console.log('✅ RTMP URL chargée depuis config.json');
+//     //     }
+//     // } catch (err) {
+//     //     console.warn('⚠️  Impossible de charger config.json:', err.message);
+//     // }
+//     //     
+//     // // Option 2: Variable d'environnement (si config.json n'existe pas)
+//     // if (!rtmpUrl) {
+//     //     rtmpUrl = process.env.RTMP_URL;
+//     //     if (rtmpUrl) {
+//     //         console.log('✅ RTMP URL chargée depuis variable d\'environnement RTMP_URL');
+//     //     }
+//     // }
+//     //     
+//     // // Option 3: Valeur par défaut (fallback)
+//     // if (!rtmpUrl) {
+//     //     rtmpUrl = 'rtmp://localhost:1935/live/test';
+//     //     console.warn('⚠️  Utilisation de l\'URL par défaut (local). Créez config.json ou définissez RTMP_URL');
+//     // }
+//     //     
+//     // // ⚠️ SÉCURITÉ: Ne jamais mettre votre clé directement dans ce fichier !
+//     // // Utilisez config.json (dans .gitignore) ou la variable d'environnement RTMP_URL
+//     // // 
+//     // // Exemples d'URLs:
+//     // //   YouTube: 'rtmp://a.rtmp.youtube.com/live2/VOTRE_STREAM_KEY'
+//     // //   Local: 'rtmp://localhost:1935/live/test'
+//     // //   Twitch: 'rtmp://live.twitch.tv/app/VOTRE_STREAM_KEY'
+//     // console.log(`📡 RTMP URL: ${rtmpUrl}`);
+//     // console.log('   (URL chargée depuis config.json, variable d\'environnement RTMP_URL, ou valeur par défaut)\n');
+//     //
+//     // const streamer = new VideoAudioStreamer();
+//     //
+//     // try {
+//     //     console.log('🔧 Initializing streamer...');
+//     //     const initialized = streamer.initialize(rtmpUrl, 30, 5000000, true, 192000, 'both');
+//     //     
+//     //     if (!initialized) {
+//     //         console.error('❌ Failed to initialize streamer');
+//     //         process.exit(1);
+//     //     }
+//     //     
+//     //     const codecName = streamer.getCodecName();
+//     //     console.log('✅ Streamer initialized');
+//     //     console.log(`📹 Video Codec: ${codecName}`);
+//     //     console.log(`📡 RTMP URL: ${rtmpUrl}\n`);
+//     //
+//     //     console.log('▶️  Starting stream...');
+//     //     const started = streamer.start();
+//     //     
+//     //     if (!started) {
+//     //         console.error('❌ Failed to start stream');
+//     //         process.exit(1);
+//     //     }
+//     //     console.log('✅ Stream started\n');
+//     //     
+//     //     // CRITICAL: Give threads time to start before continuing
+//     //     console.log('[DEBUG] Waiting 2 seconds for threads to initialize...');
+//     //     await new Promise(resolve => setTimeout(resolve, 2000));
+//     //     console.log('[DEBUG] Thread initialization wait completed\n');
+//     //
+//     //     console.log('⏱️  Streaming for 30 seconds...');
+//     //     console.log('   (Monitor for backpressure, reconnect, and drop statistics)\n');
+//     //     const startTime = Date.now();
+//     //     
+//     //     let progressInterval = null;
+//     //     let statsErrorCount = 0;
+//     //     
+//     //     try {
+//     //         progressInterval = setInterval(() => {
+//     //             try {
+//     //                 const elapsed = (Date.now() - startTime) / 1000;
+//     //                 const stats = streamer.getStatistics();
+//     //                 const isConnected = streamer.isConnected();
+//     //                 const isBackpressure = streamer.isBackpressure();
+//     //                 
+//     //                 console.log(`   📊 ${elapsed.toFixed(1)}s elapsed | Connected: ${isConnected ? '✅' : '❌'} | Backpressure: ${isBackpressure ? '⚠️' : '✅'}`);
+//     //                 console.log(`      Video: ${stats.videoFrames || 0} frames, ${stats.videoPackets || 0} packets`);
+//     //                 console.log(`      Audio: ${stats.audioPackets || 0} packets`);
+//     //                 console.log('');
+//     //                 statsErrorCount = 0; // Reset error count on success
+//     //             } catch (error) {
+//     //                 statsErrorCount++;
+//     //                 console.error(`❌ Error getting stats (attempt ${statsErrorCount}):`, error);
+//     //                 if (statsErrorCount >= 3) {
+//     //                     console.error('❌ Too many errors getting stats, stopping interval');
+//     //                     if (progressInterval) {
+//     //                         clearInterval(progressInterval);
+//     //                         progressInterval = null;
+//     //                     }
+//     //                 }
+//     //             }
+//     //         }, 2000);
+//     //     } catch (error) {
+//     //         console.error('❌ Error setting up stats interval:', error);
+//     //     }
+//     //
+//     //     console.log('⏳ Waiting 30 seconds...');
+//     //     
+//     //     // Wait 30 seconds
+//     //     await new Promise(resolve => setTimeout(resolve, 30000));
+//     //     clearInterval(progressInterval);
+//     //
+//     //     console.log('\n⏹️  Stopping stream...');
+//     //     try {
+//     //         const stopped = streamer.stop();
+//     //         
+//     //         if (!stopped) {
+//     //             console.error('❌ Failed to stop stream');
+//     //             process.exit(1);
+//     //         }
+//     //         console.log('✅ Stream stopped\n');
+//     //     } catch (error) {
+//     //         console.error('❌ Error stopping stream:', error);
+//     //         process.exit(1);
+//     //     }
+//     //
+//     //     console.log('📊 Getting final statistics...');
+//     //     let finalStats;
+//     //     try {
+//     //         finalStats = streamer.getStatistics();
+//     //         console.log('✅ Statistics retrieved\n');
+//     //     } catch (error) {
+//     //         console.error('❌ Error getting statistics:', error);
+//     //         console.error('   This might indicate the streamer crashed or was destroyed');
+//     //         process.exit(1);
+//     //     }
+//     //     console.log('📊 Final Statistics:');
+//     //     console.log(`   Video Frames: ${finalStats.videoFrames || 0}`);
+//     //     console.log(`   Video Packets: ${finalStats.videoPackets || 0}`);
+//     //     console.log(`   Audio Packets: ${finalStats.audioPackets || 0}\n`);
+//     //
+//     //     console.log('📝 Getting codec name...');
+//     //     let finalCodecName;
+//     //     try {
+//     //         finalCodecName = streamer.getCodecName();
+//     //     } catch (error) {
+//     //         console.error('❌ Error getting codec name:', error);
+//     //         finalCodecName = 'unknown';
+//     //     }
+//     //     
+//     //     console.log(`\n✅ Test completed! Streamed to: ${rtmpUrl}`);
+//     //     console.log(`\n📝 Test Summary:`);
+//     //     console.log(`   - COM Mode: STA (Electron-like)`);
+//     //     console.log(`   - Video Codec Used: ${finalCodecName}`);
+//     //     console.log(`   - Connected: ${streamer.isConnected() ? '✅' : '❌'}`);
+//     //
+//     // } catch (error) {
+//     //     console.error('\n❌ Error during streaming:', error);
+//     //     if (error.stack) {
+//     //         console.error('Stack trace:', error.stack);
+//     //     }
+//     //     process.exit(1);
+//     // }
+// }
 
-const outputPath = path.join(__dirname, 'debug_ffmpeg_output.mp4');
-
-console.log('🎬 Starting FFmpeg recording test...');
-console.log('📁 Output will be:', outputPath);
-
-const ffmpegArgs = [
-  '-f', 'gdigrab',
-  '-framerate', '30',
-  '-i', 'desktop',
-  '-f', 'f32le',
-  '-ar', '48000',
-  '-ac', '2',
-  '-use_wallclock_as_timestamps', '1',
-  '-i', 'pipe:0',
-  '-c:v', 'libx264',
-  '-preset', 'veryfast',
-  '-crf', '23',
-  '-pix_fmt', 'yuv420p',
-  '-r', '30',
-  '-c:a', 'aac',
-  '-b:a', '192k',
-  '-ar', '48000',
-  '-ac', '2',
-  '-map', '0:v:0',
-  '-map', '1:a:0',
-  '-shortest',
-  '-y',
-  outputPath
-];
-
-console.log('🎥 Starting FFmpeg...');
-ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
-  stdio: ['pipe', 'pipe', 'pipe'],
-  windowsHide: true
-});
-
-let audioBytesSent = 0;
-let isRecording = true;
-let isWaitingForDrain = false;
-
-let pacingStartTime = null;
-let pacingFramesSent = 0;
-const PACING_SAMPLE_RATE = 48000;
-const PACING_CHANNELS = 2;
-const PACING_BYTES_PER_FRAME = PACING_CHANNELS * 4;
-const PACING_FRAMES_PER_10MS = Math.floor(PACING_SAMPLE_RATE / 100);
-
-ffmpegProcess.stderr.on('data', (data) => {
-  const output = data.toString();
-  if (output.includes('frame=') || output.includes('error') || output.includes('Error')) {
-    process.stdout.write(`FFmpeg: ${output}`);
-  }
-});
-
-ffmpegProcess.on('exit', (code) => {
-  console.log(`\n🎬 FFmpeg exited with code ${code}`);
-  if (code === 0) {
-    console.log(`✅ Recording saved: ${outputPath}`);
-    const stats = fs.statSync(outputPath);
-    console.log(`📦 File size: ${(stats.size / 1024 / 1024).toFixed(2)} MB`);
-  } else {
-    console.error(`❌ FFmpeg failed with code ${code}`);
-  }
-  process.exit(code);
-});
-
-function mixAndSendToFFmpeg() {
-  if (!isRecording || !ffmpegProcess || !ffmpegProcess.stdin) {
-    return;
-  }
-
-  const format = desktopFormat || micFormat;
-  if (!format) {
-    return;
-  }
-
-  if (pacingStartTime === null) {
-    pacingStartTime = Date.now();
-    pacingFramesSent = 0;
-  }
-
-  const elapsedMs = Date.now() - pacingStartTime;
-  const expectedFrames = Math.floor((elapsedMs / 1000) * PACING_SAMPLE_RATE);
-  const framesToSend = expectedFrames - pacingFramesSent;
-  const maxFramesToSend = Math.min(framesToSend, PACING_FRAMES_PER_10MS * 2);
-
-  if (maxFramesToSend <= 0) {
-    return;
-  }
-
-  const bytesPerFrame = format.channels * (format.bitsPerSample / 8);
-  const desktopPcm = desktopChunks.length > 0 ? Buffer.concat(desktopChunks) : null;
-  const micPcm = micChunks.length > 0 ? Buffer.concat(micChunks) : null;
-
-  if (!desktopPcm && !micPcm) {
-    return;
-  }
-
-  const desktopFrames = desktopPcm ? desktopPcm.length / bytesPerFrame : 0;
-  const micFrames = micPcm ? micPcm.length / bytesPerFrame : 0;
-  
-  let outputFrames;
-  if (desktopFrames === 0 && micFrames === 0) {
-    return;
-  } else if (desktopFrames === 0) {
-    outputFrames = Math.min(micFrames, maxFramesToSend);
-  } else if (micFrames === 0) {
-    outputFrames = Math.min(desktopFrames, maxFramesToSend);
-  } else {
-    outputFrames = Math.min(desktopFrames, micFrames, maxFramesToSend);
-  }
-
-  if (outputFrames === 0) {
-    return;
-  }
-
-  const mixedBuffer = Buffer.alloc(outputFrames * bytesPerFrame);
-  const micGain = 0.9;
-
-  for (let frame = 0; frame < outputFrames; frame++) {
-    for (let ch = 0; ch < format.channels; ch++) {
-      let desktopSample = 0;
-      let micSample = 0;
-
-      if (desktopPcm && frame < desktopFrames) {
-        const offset = frame * bytesPerFrame + ch * (format.bitsPerSample / 8);
-        desktopSample = desktopPcm.readFloatLE(offset);
-      }
-
-      if (micPcm && frame < micFrames) {
-        const offset = frame * bytesPerFrame + ch * (format.bitsPerSample / 8);
-        micSample = micPcm.readFloatLE(offset) * micGain;
-      }
-
-      let mixed = desktopSample + micSample;
-      if (mixed > 1.0) mixed = 1.0;
-      if (mixed < -1.0) mixed = -1.0;
-
-      const outputOffset = frame * bytesPerFrame + ch * (format.bitsPerSample / 8);
-      mixedBuffer.writeFloatLE(mixed, outputOffset);
+// Handle uncaught errors
+process.on('uncaughtException', (error) => {
+    console.error('\n❌ UNCAUGHT EXCEPTION:', error);
+    if (error.stack) {
+        console.error('Stack trace:', error.stack);
     }
-  }
+    process.exit(1);
+});
 
-  const desktopBytesUsed = outputFrames * bytesPerFrame;
-  const micBytesUsed = outputFrames * bytesPerFrame;
-  
-  if (desktopPcm && desktopPcm.length > desktopBytesUsed) {
-    const remaining = desktopPcm.subarray(desktopBytesUsed);
-    desktopChunks = [remaining];
-  } else {
-    desktopChunks = [];
-  }
-  
-  if (micPcm && micPcm.length > micBytesUsed) {
-    const remaining = micPcm.subarray(micBytesUsed);
-    micChunks = [remaining];
-  } else {
-    micChunks = [];
-  }
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('\n❌ UNHANDLED REJECTION:', reason);
+    process.exit(1);
+});
 
-  try {
-    const canWrite = ffmpegProcess.stdin.write(mixedBuffer, (err) => {
-      if (err) {
-        console.error('❌ Error writing to FFmpeg:', err);
-        isRecording = false;
-        isWaitingForDrain = false;
-      }
-    });
+// Keep process alive - prevent premature exit
+process.stdin.resume();
 
-    if (!canWrite && !isWaitingForDrain) {
-      isWaitingForDrain = true;
-      ffmpegProcess.stdin.once('drain', () => {
-        isWaitingForDrain = false;
-        mixAndSendToFFmpeg();
-      });
+// // Run the streaming test (commented out - using the active test below)
+// testVideoAudioStreamer().catch(error => {
+//     console.error('\n❌ Fatal error in test:', error);
+//     if (error.stack) {
+//         console.error('Stack trace:', error.stack);
+//     }
+//     process.exit(1);
+// });
+
+// ============================================================================
+// SECTION 6: test_video_audio_streamer.js (ACTIVE - STREAMING TEST)
+// OBS-style RTMP validation test
+// ============================================================================
+
+async function testVideoAudioStreamer() {
+    console.log('\n📡 RTMP STREAMING TEST (OBS-style validation)\n');
+
+    const VideoAudioStreamer = nativeModule.VideoAudioStreamer;
+    if (!VideoAudioStreamer) {
+        throw new Error('VideoAudioStreamer not available');
     }
 
-    audioBytesSent += mixedBuffer.length;
-    pacingFramesSent += outputFrames;
-  } catch (err) {
-    console.error('❌ Error sending audio to FFmpeg:', err);
-    isRecording = false;
-    isWaitingForDrain = false;
-  }
+    // ---- RTMP URL loading ---------------------------------------------------
+    let rtmpUrl = null;
+    try {
+        const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json')));
+        rtmpUrl = cfg.rtmpUrl;
+        console.log('✅ RTMP URL loaded from config.json');
+    } catch {}
+
+    if (!rtmpUrl) {
+        rtmpUrl = process.env.RTMP_URL;
+        console.log('✅ RTMP URL loaded from env');
+    }
+
+    if (!rtmpUrl) {
+        throw new Error('❌ No RTMP URL provided');
+    }
+
+    console.log(`📡 RTMP URL: ${rtmpUrl}\n`);
+
+    // ---- COM init -----------------------------------------------------------
+    if (nativeModule.initializeCOMInSTAMode) {
+        console.log('🔧 Initializing COM in STA (Electron-like)');
+        nativeModule.initializeCOMInSTAMode();
+    }
+
+    const streamer = new VideoAudioStreamer();
+
+    console.log('🔧 Initializing streamer...');
+    if (!streamer.initialize(rtmpUrl, 30, 5_000_000, true, 192_000, 'both')) {
+        throw new Error('❌ streamer.initialize failed');
+    }
+
+    console.log(`📹 Codec: ${streamer.getCodecName()}`);
+
+    console.log('\n▶️  STARTING STREAM');
+    if (!streamer.start()) {
+        throw new Error('❌ streamer.start failed');
+    }
+
+    // ---- OBS-style runtime validation --------------------------------------
+    let lastStats = null;
+    let firstPacketTime = null;
+    let firstBufferDrain = null;
+    let startTime = Date.now();
+
+    const interval = setInterval(() => {
+        const t = ((Date.now() - startTime) / 1000).toFixed(1);
+        const stats = streamer.getStatistics();
+
+        if (!lastStats) {
+            console.log(`[${t}s] stats snapshot:`, stats);
+        }
+
+        // Detect first outgoing packet
+        if (!firstPacketTime && stats.videoPackets > 0) {
+            firstPacketTime = t;
+            console.log(`✅ FIRST VIDEO PACKET SENT @ ${t}s`);
+        }
+
+        // Detect buffer drain (critical) - bufferSize might not be in stats
+        if (!firstBufferDrain && stats.videoPackets > 0) {
+            firstBufferDrain = t;
+            console.log(`✅ PACKETS FLOWING @ ${t}s`);
+        }
+
+        // Hard assertions (fail fast)
+        if (t > 5 && stats.videoPackets === 0) {
+            console.error('❌ No video packets after 5s → encoder or muxer stalled');
+            process.exit(1);
+        }
+
+        if (t > 8 && !streamer.isConnected()) {
+            console.error('❌ RTMP not connected after 8s');
+            process.exit(1);
+        }
+
+        console.log(
+            `[${t}s] ` +
+            `Vpkt=${stats.videoPackets || 0} ` +
+            `Apkt=${stats.audioPackets || 0} ` +
+            `Conn=${streamer.isConnected()}`
+        );
+
+        lastStats = stats;
+    }, 1000);
+
+    // ---- Fixed runtime (OBS default: 20s is enough) -------------------------
+    await new Promise(r => setTimeout(r, 20_000));
+    clearInterval(interval);
+
+    console.log('\n⏹️  STOPPING STREAM');
+    streamer.stop();
+
+    const final = streamer.getStatistics();
+
+    console.log('\n📊 FINAL STATS');
+    console.log(final);
+
+    // ---- Final verdict ------------------------------------------------------
+    if (final.videoPackets === 0) {
+        throw new Error('❌ STREAM FAILED: no packets sent');
+    }
+
+    if (!firstBufferDrain) {
+        throw new Error('❌ STREAM FAILED: no packets flowing');
+    }
+
+    console.log('\n🎉 STREAM PIPELINE VALID');
+    console.log('👉 If YouTube Studio still shows nothing:');
+    console.log('   - RTMP key / ingest issue');
+    console.log('   - or network firewall');
 }
 
-console.log('🎤 Initializing WASAPI audio capture...');
-const audioCapture = new WASAPICapture((buffer, source, format) => {
-  if (!isRecording) {
-    return;
-  }
+// ----------------------------------------------------------------------------
 
-  if (!buffer || buffer.length === 0) {
-    return;
-  }
-
-  if (source === 'desktop') {
-    if (!desktopFormat) {
-      desktopFormat = format;
-      console.log(`🎵 Desktop format: ${format.sampleRate} Hz, ${format.channels}ch, ${format.bitsPerSample}-bit`);
-    }
-    desktopChunks.push(buffer);
-    desktopCallbackCount++;
-  } else if (source === 'mic') {
-    if (!micFormat) {
-      micFormat = format;
-      console.log(`🎵 Mic format: ${format.sampleRate} Hz, ${format.channels}ch, ${format.bitsPerSample}-bit`);
-    }
-    micChunks.push(buffer);
-    micCallbackCount++;
-  }
-}, 'both');
-
-const format = audioCapture.getFormat();
-if (format) {
-  console.log(`🎵 Unified audio format: ${format.sampleRate} Hz, ${format.channels}ch, ${format.bitsPerSample}-bit`);
-}
-
-console.log('⏺ Starting audio capture...');
-const started = audioCapture.start();
-if (!started) {
-  console.error('❌ Failed to start audio capture');
-  process.exit(1);
-}
-
-console.log('✅ Audio capture started');
-console.log('⏺ Recording for ~10 seconds...\n');
-
-const mixInterval = setInterval(() => {
-  if (isRecording) {
-    mixAndSendToFFmpeg();
-  }
-}, 10);
-
-setTimeout(() => {
-  console.log('\n🛑 Stopping capture...');
-  isRecording = false;
-  
-  clearInterval(mixInterval);
-  mixAndSendToFFmpeg();
-  
-  setTimeout(() => {
-    console.log(`📊 Desktop callbacks: ${desktopCallbackCount}`);
-    console.log(`📊 Mic callbacks: ${micCallbackCount}`);
-    console.log(`📦 Audio bytes sent to FFmpeg: ${(audioBytesSent / 1024 / 1024).toFixed(2)} MB`);
-    
-    audioCapture.stop();
-    
-    if (ffmpegProcess && ffmpegProcess.stdin) {
-      console.log('📝 Closing FFmpeg stdin...');
-      ffmpegProcess.stdin.end();
-    }
-  }, 200);
-}, 10000);
-
-process.on('SIGINT', () => {
-  console.log('\n\n🛑 Interrupted by user');
-  isRecording = false;
-  clearInterval(mixInterval);
-  mixAndSendToFFmpeg();
-  setTimeout(() => {
-    audioCapture.stop();
-    if (ffmpegProcess && ffmpegProcess.stdin) {
-      ffmpegProcess.stdin.end();
-    }
-    process.exit(0);
-  }, 200);
+testVideoAudioStreamer().catch(err => {
+    console.error('\n❌ TEST FAILED');
+    console.error(err);
+    process.exit(1);
 });
-*/
 
 // ============================================================================
 // NOTE: Additional debug scripts (debug_audio_*.js, debug_wasapi_*.js, etc.)
