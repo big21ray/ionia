@@ -48,14 +48,17 @@ async function testStreamingHeadless() {
 
     console.log(`Target RTMP URL: ${rtmpUrl}\n`);
 
-    const VideoAudioStreamer = nativeModule.VideoAudioStreamer;
-    const streamer = new VideoAudioStreamer();
+        // For headless testing, use a local test RTMP URL (won't connect, but encoder will run)
+        // Comment this out if you have a real RTMP server
+        const testRtmpUrl = 'rtmp://127.0.0.1:1935/live/test';
+        console.log('NOTE: Using local test RTMP URL (won\'t actually connect)\n');
 
-    try {
-        console.log('Initializing streamer...');
-        const initialized = streamer.initialize(rtmpUrl, 30, 5000000, true, 192000, 'both');
-        
-        if (!initialized) {
+        const VideoAudioStreamer = nativeModule.VideoAudioStreamer;
+        const streamer = new VideoAudioStreamer();
+
+        try {
+            console.log('Initializing streamer...');
+            const initialized = streamer.initialize(testRtmpUrl, 30, 5000000, true, 192000, 'both');
             console.error('Failed to initialize streamer');
             process.exit(1);
         }
@@ -77,13 +80,15 @@ async function testStreamingHeadless() {
         await new Promise(resolve => setTimeout(resolve, 2000));
         console.log('✓ Threads ready\n');
 
-        // Stream for 20 seconds (shorter than full test for headless)
-        console.log('Streaming for 20 seconds...');
-        console.log('(No test pattern available in pure JS, but video encoder is running)\n');
+        // Stream for 10 seconds with injected test pattern frames
+        console.log('Streaming for 10 seconds with test pattern frames...\n');
         
         const startTime = Date.now();
-        const streamDuration = 20000;
+        const streamDuration = 10000;
+        const frameInterval = 1000 / 30;  // ~33ms per frame @ 30fps
         
+        let nextFrameTime = Date.now();
+        let frameCount = 0;
         let lastStats = { videoFrames: 0, videoPackets: 0, audioPackets: 0 };
         
         const statsInterval = setInterval(() => {
@@ -107,9 +112,60 @@ async function testStreamingHeadless() {
             }
         }, 2000);
 
-        // Wait for streaming duration
-        await new Promise(resolve => setTimeout(resolve, streamDuration));
+        // Generate test frames and inject them
+        console.log('Starting frame injection loop...\n');
+        
+        while (Date.now() - startTime < streamDuration) {
+            const now = Date.now();
+            
+            if (now >= nextFrameTime) {
+                // Generate a simple test pattern frame (color bars)
+                const frameData = Buffer.alloc(1920 * 1080 * 4);
+                
+                // Create 8 color bars
+                const barWidth = 1920 / 8;
+                const colors = [
+                    { b: 255, g: 255, r: 255 },  // White
+                    { b: 255, g: 255, r: 0 },    // Yellow
+                    { b: 0, g: 255, r: 255 },    // Cyan
+                    { b: 0, g: 255, r: 0 },      // Green
+                    { b: 255, g: 0, r: 255 },    // Magenta
+                    { b: 255, g: 0, r: 0 },      // Red
+                    { b: 0, g: 0, r: 255 },      // Blue
+                    { b: 0, g: 0, r: 0 }         // Black
+                ];
+                
+                for (let y = 0; y < 1080; y++) {
+                    for (let x = 0; x < 1920; x++) {
+                        const barIndex = Math.floor(x / barWidth);
+                        const color = colors[barIndex];
+                        const offset = (y * 1920 + x) * 4;
+                        frameData[offset] = color.b;
+                        frameData[offset + 1] = color.g;
+                        frameData[offset + 2] = color.r;
+                        frameData[offset + 3] = 255;
+                    }
+                }
+                
+                // Inject the frame
+                streamer.injectFrame(frameData);
+                frameCount++;
+                nextFrameTime += frameInterval;
+                
+                // Show progress every 30 frames
+                if (frameCount % 30 === 0) {
+                    const elapsed = (now - startTime) / 1000;
+                    process.stdout.write(`  Generated ${frameCount} frames (${elapsed.toFixed(1)}s)...\r`);
+                }
+            }
+            
+            // Small sleep to not busy-wait
+            await new Promise(resolve => setTimeout(resolve, 1));
+        }
+        
         clearInterval(statsInterval);
+        process.stdout.write('\n');
+        console.log(`\nTotal frames injected: ${frameCount}\n`);
 
         // Stop streaming
         console.log('\nStopping stream...');

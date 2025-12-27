@@ -43,6 +43,7 @@ private:
     Napi::Value GetCodecName(const Napi::CallbackInfo& info);
     Napi::Value IsConnected(const Napi::CallbackInfo& info);
     Napi::Value IsBackpressure(const Napi::CallbackInfo& info);
+    Napi::Value InjectFrame(const Napi::CallbackInfo& info);  // For headless testing
 
     // Threads
     void CaptureThread();
@@ -90,6 +91,12 @@ private:
     std::atomic<uint64_t> m_audioPackets;
 
     bool m_comInitialized;
+    
+    // Frame injection for headless testing
+    std::mutex m_injectedFrameMutex;
+    std::vector<uint8_t> m_injectedFrameBuffer;
+    bool m_hasInjectedFrame = false;
+    bool m_useInjectedFrames = false;
 };
 
 /* ========================================================= */
@@ -105,7 +112,8 @@ Napi::Object VideoAudioStreamerAddon::Init(Napi::Env env, Napi::Object exports) 
         InstanceMethod("getStatistics", &VideoAudioStreamerAddon::GetStatistics),
         InstanceMethod("getCodecName", &VideoAudioStreamerAddon::GetCodecName),
         InstanceMethod("isConnected", &VideoAudioStreamerAddon::IsConnected),
-        InstanceMethod("isBackpressure", &VideoAudioStreamerAddon::IsBackpressure)
+        InstanceMethod("isBackpressure", &VideoAudioStreamerAddon::IsBackpressure),
+        InstanceMethod("injectFrame", &VideoAudioStreamerAddon::InjectFrame)  // For testing
     });
 
     constructor = Napi::Persistent(fn);
@@ -176,23 +184,29 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
     }
 
     m_desktop = std::make_unique<DesktopDuplication>();
-    if (!m_desktop->Initialize())
-        Napi::Error::New(env, "DesktopDuplication failed").ThrowAsJavaScriptException();
+    if (!m_desktop->Initialize()) {
+        fprintf(stderr, "[Initialize] DesktopDuplication failed\n");
+        return Napi::Boolean::New(env, false);
+    }
 
     m_desktop->GetDesktopDimensions(&m_width, &m_height);
 
     m_videoEncoder = std::make_unique<VideoEncoder>();
     if (!m_videoEncoder->Initialize(m_width, m_height, m_fps,
-                                    m_videoBitrate, m_useNvenc, true))
-        Napi::Error::New(env, "VideoEncoder failed").ThrowAsJavaScriptException();
+                                    m_videoBitrate, m_useNvenc, true)) {
+        fprintf(stderr, "[Initialize] VideoEncoder failed\n");
+        return Napi::Boolean::New(env, false);
+    }
 
     m_streamMuxer = std::make_unique<StreamMuxer>();
     m_buffer = std::make_unique<StreamBuffer>(100, 2000);
     m_streamMuxer->SetStreamBuffer(m_buffer.get());
 
     if (!m_streamMuxer->Initialize(m_rtmpUrl, m_videoEncoder.get(),
-                                   48000, 2, m_audioBitrate))
-        Napi::Error::New(env, "StreamMuxer failed").ThrowAsJavaScriptException();
+                                   48000, 2, m_audioBitrate)) {
+        fprintf(stderr, "[Initialize] StreamMuxer failed\n");
+        return Napi::Boolean::New(env, false);
+    }
 
     m_audioCapture = std::make_unique<AudioCapture>();
     m_audioCapture->Initialize(
@@ -248,18 +262,28 @@ Napi::Value VideoAudioStreamerAddon::Stop(const Napi::CallbackInfo& info) {
 /* ========================================================= */
 
 void VideoAudioStreamerAddon::CaptureThread() {
-    if (!m_desktop || !m_videoEncoder || !m_streamMuxer) {
+    fprintf(stderr, "[CaptureThread] Starting\n");
+    if (!m_videoEncoder || !m_streamMuxer) {
         fprintf(stderr, "[CaptureThread] NULL component\n");
+        return;
+    }
+    
+    // Check if we're using injected frames or real desktop capture
+    bool useRealCapture = m_desktop && !m_useInjectedFrames;
+    
+    if (useRealCapture && !m_desktop) {
+        fprintf(stderr, "[CaptureThread] DesktopDuplication not initialized\n");
         return;
     }
     
     std::vector<uint8_t> frame(m_width * m_height * 4);
     
     // Frame pacing: only capture when it's time for the next frame
-    // This matches OBS and VideoAudioRecorder approach
     auto startTime = std::chrono::high_resolution_clock::now();
     uint64_t frameNumber = 0;
-    const int64_t frameIntervalNs = static_cast<int64_t>(1000000000.0 / m_fps);  // ns per frame @ m_fps
+    const int64_t frameIntervalNs = static_cast<int64_t>(1000000000.0 / m_fps);
+
+    fprintf(stderr, "[CaptureThread] Loop starting, frameInterval=%lld ns\n", frameIntervalNs);
 
     while (!m_shouldStop) {
         auto currentTime = std::chrono::high_resolution_clock::now();
@@ -267,10 +291,31 @@ void VideoAudioStreamerAddon::CaptureThread() {
         int64_t expectedFrame = elapsed / frameIntervalNs;
 
         if (frameNumber < expectedFrame) {
-            // Try to capture frame
-            uint32_t w, h;
-            int64_t ts;
-            if (m_desktop->CaptureFrame(frame.data(), &w, &h, &ts)) {
+            bool frameReady = false;
+            
+            if (m_useInjectedFrames) {
+                fprintf(stderr, "[CaptureThread] Checking for injected frame, hasFrame=%d\n", m_hasInjectedFrame);
+                // Use injected frame for testing
+                {
+                    std::lock_guard<std::mutex> lock(m_injectedFrameMutex);
+                    if (m_hasInjectedFrame) {
+                        fprintf(stderr, "[CaptureThread] Copying injected frame\n");
+                        std::copy(m_injectedFrameBuffer.begin(), m_injectedFrameBuffer.end(), frame.begin());
+                        m_hasInjectedFrame = false;
+                        frameReady = true;
+                    }
+                }
+            } else if (useRealCapture) {
+                // Use real desktop capture
+                uint32_t w, h;
+                int64_t ts;
+                if (m_desktop->CaptureFrame(frame.data(), &w, &h, &ts)) {
+                    frameReady = true;
+                }
+            }
+            
+            if (frameReady) {
+                fprintf(stderr, "[CaptureThread] Encoding frame %llu\n", frameNumber);
                 auto packets = m_videoEncoder->EncodeFrame(frame.data());
                 for (auto& p : packets) {
                     if (m_streamMuxer->WriteVideoPacket(&p, frameNumber))
@@ -284,6 +329,7 @@ void VideoAudioStreamerAddon::CaptureThread() {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
+    fprintf(stderr, "[CaptureThread] Exiting\n");
 }
 
 void VideoAudioStreamerAddon::AudioTickThread() {
@@ -353,7 +399,25 @@ Napi::Value VideoAudioStreamerAddon::GetStatistics(const Napi::CallbackInfo& inf
     return o;
 }
 
-/* ========================================================= */
+Napi::Value VideoAudioStreamerAddon::InjectFrame(const Napi::CallbackInfo& info) {
+    if (info.Length() < 1 || !info[0].IsBuffer()) {
+        Napi::Error::New(info.Env(), "Expected Buffer argument").ThrowAsJavaScriptException();
+        return info.Env().Null();
+    }
+
+    Napi::Buffer<uint8_t> buffer = info[0].As<Napi::Buffer<uint8_t>>();
+    
+    {
+        std::lock_guard<std::mutex> lock(m_injectedFrameMutex);
+        // Copy frame data into buffer
+        m_injectedFrameBuffer.resize(buffer.Length());
+        std::copy(buffer.Data(), buffer.Data() + buffer.Length(), m_injectedFrameBuffer.begin());
+        m_hasInjectedFrame = true;
+        m_useInjectedFrames = true;  // Enable injected frame mode
+    }
+
+    return Napi::Boolean::New(info.Env(), true);
+}
 
 void VideoAudioStreamerAddon::Cleanup() {
     m_desktop.reset();

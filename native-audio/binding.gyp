@@ -19,6 +19,7 @@
         "src/stream_muxer.cpp",
         "src/stream_buffer.cpp",
         "src/test_pattern_generator.cpp",
+        "src/wasapi_video_engine.cpp",
         "src/wasapi_video_recorder.cpp",
         "src/wasapi_video_audio_recorder.cpp",
         "src/wasapi_video_audio_streamer.cpp"
