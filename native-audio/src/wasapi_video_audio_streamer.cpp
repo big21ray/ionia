@@ -8,6 +8,7 @@
 #include "audio_engine.h"
 #include "audio_encoder.h"
 #include "encoded_audio_packet.h"
+#include "wasapi_video_engine.h"
 
 #include <windows.h>
 #include <comdef.h>
@@ -44,9 +45,11 @@ private:
     Napi::Value IsConnected(const Napi::CallbackInfo& info);
     Napi::Value IsBackpressure(const Napi::CallbackInfo& info);
     Napi::Value InjectFrame(const Napi::CallbackInfo& info);  // For headless testing
+    Napi::Value SetThreadConfig(const Napi::CallbackInfo& info);  // For testing threads
 
     // Threads
     void CaptureThread();
+    void VideoTickThread();
     void AudioTickThread();
     void NetworkSendThread();
 
@@ -61,6 +64,7 @@ private:
     // Components
     std::unique_ptr<DesktopDuplication> m_desktop;
     std::unique_ptr<VideoEncoder>       m_videoEncoder;
+    std::unique_ptr<VideoEngine>        m_videoEngine;
     std::unique_ptr<StreamMuxer>        m_streamMuxer;
     std::unique_ptr<StreamBuffer>       m_buffer;
     std::unique_ptr<AudioCapture>       m_audioCapture;
@@ -69,6 +73,7 @@ private:
 
     // Threads
     std::thread m_captureThread;
+    std::thread m_videoTickThread;
     std::thread m_audioTickThread;
     std::thread m_networkThread;
 
@@ -92,11 +97,22 @@ private:
 
     bool m_comInitialized;
     
+    // Audio diagnostics
+    std::atomic<uint64_t> m_audioFramesReceived;  // Total audio frames received from capture
+    std::atomic<uint64_t> m_audioFramesEncoded;   // Total audio frames encoded
+    uint64_t m_lastAudioPacketCount = 0;          // For detecting gaps
+    
     // Frame injection for headless testing
     std::mutex m_injectedFrameMutex;
     std::vector<uint8_t> m_injectedFrameBuffer;
     bool m_hasInjectedFrame = false;
     bool m_useInjectedFrames = false;
+    
+    // === THREAD CONTROL FLAGS (for debugging) ===
+    bool m_enableCaptureThread = true;
+    bool m_enableVideoTickThread = true;
+    bool m_enableAudioTickThread = true;
+    bool m_enableNetworkSendThread = true;  // NOW ENABLED
 };
 
 /* ========================================================= */
@@ -113,7 +129,8 @@ Napi::Object VideoAudioStreamerAddon::Init(Napi::Env env, Napi::Object exports) 
         InstanceMethod("getCodecName", &VideoAudioStreamerAddon::GetCodecName),
         InstanceMethod("isConnected", &VideoAudioStreamerAddon::IsConnected),
         InstanceMethod("isBackpressure", &VideoAudioStreamerAddon::IsBackpressure),
-        InstanceMethod("injectFrame", &VideoAudioStreamerAddon::InjectFrame)  // For testing
+        InstanceMethod("injectFrame", &VideoAudioStreamerAddon::InjectFrame),
+        InstanceMethod("setThreadConfig", &VideoAudioStreamerAddon::SetThreadConfig)
     });
 
     constructor = Napi::Persistent(fn);
@@ -138,6 +155,8 @@ VideoAudioStreamerAddon::VideoAudioStreamerAddon(const Napi::CallbackInfo& info)
       m_videoFrames(0),
       m_videoPackets(0),
       m_audioPackets(0),
+      m_audioFramesReceived(0),
+      m_audioFramesEncoded(0),
       m_comInitialized(false)
 {
 }
@@ -152,6 +171,7 @@ VideoAudioStreamerAddon::~VideoAudioStreamerAddon() {
     if (m_audioCapture) m_audioCapture->Stop();
 
     if (m_captureThread.joinable()) m_captureThread.join();
+    if (m_videoTickThread.joinable()) m_videoTickThread.join();
     if (m_audioTickThread.joinable()) m_audioTickThread.join();
     if (m_networkThread.joinable()) m_networkThread.join();
 
@@ -198,12 +218,18 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
         return Napi::Boolean::New(env, false);
     }
 
+    m_videoEngine = std::make_unique<VideoEngine>();
+    if (!m_videoEngine->Initialize(m_fps, m_videoEncoder.get())) {
+        fprintf(stderr, "[Initialize] VideoEngine failed\n");
+        return Napi::Boolean::New(env, false);
+    }
+
     m_streamMuxer = std::make_unique<StreamMuxer>();
     m_buffer = std::make_unique<StreamBuffer>(100, 2000);
     m_streamMuxer->SetStreamBuffer(m_buffer.get());
 
     if (!m_streamMuxer->Initialize(m_rtmpUrl, m_videoEncoder.get(),
-                                   48000, 2, m_audioBitrate)) {
+                                   AudioEngine::SAMPLE_RATE, AudioEngine::CHANNELS, m_audioBitrate)) {
         fprintf(stderr, "[Initialize] StreamMuxer failed\n");
         return Napi::Boolean::New(env, false);
     }
@@ -218,16 +244,88 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
 
     m_audioEngine = std::make_unique<AudioEngine>();
     m_audioEncoder = std::make_unique<AudioEncoder>();
-    m_audioEncoder->Initialize(48000, 2, m_audioBitrate);
+    m_audioEncoder->Initialize(AudioEngine::SAMPLE_RATE, AudioEngine::CHANNELS, m_audioBitrate);
 
+    // Initialize AudioEngine with callback that encodes audio
     m_audioEngine->Initialize([this](const AudioPacket& p) {
-        auto encoded = m_audioEncoder->EncodeFrames(
-            reinterpret_cast<const float*>(p.data.data()),
-            static_cast<uint32_t>(p.duration)
-        );
-        for (auto& pkt : encoded) {
-            if (m_streamMuxer->WriteAudioPacket(pkt))
-                m_audioPackets.fetch_add(1);
+        if (!m_audioEncoder || !m_streamMuxer || p.data.empty()) {
+            fprintf(stderr, "[AudioCallback] Null check failed: encoder=%p, muxer=%p, dataSize=%zu\n", 
+                    m_audioEncoder.get(), m_streamMuxer.get(), p.data.size());
+            fflush(stderr);
+            return;
+        }
+        
+        // Track received audio frames
+        m_audioFramesReceived.fetch_add(p.duration);
+        
+        try {
+            fprintf(stderr, "[AudioCallback] Encoding %llu frames (total received: %llu)...\n", 
+                    static_cast<uint64_t>(p.duration), m_audioFramesReceived.load());
+            fflush(stderr);
+            
+            auto encoded = m_audioEncoder->EncodeFrames(
+                reinterpret_cast<const float*>(p.data.data()),
+                static_cast<uint32_t>(p.duration)
+            );
+            
+            // Track encoded frames
+            m_audioFramesEncoded.fetch_add(p.duration);
+            
+            fprintf(stderr, "[AudioCallback] Got %zu encoded packets (total frames encoded: %llu)\n", 
+                    encoded.size(), m_audioFramesEncoded.load());
+            fflush(stderr);
+            
+            for (size_t i = 0; i < encoded.size(); i++) {
+                try {
+                    auto& pkt = encoded[i];
+                    fprintf(stderr, "[AudioCallback] Writing packet %zu/%zu, size=%zu\n", i, encoded.size(), pkt.size());
+                    fflush(stderr);
+                    
+                    if (!m_streamMuxer) {
+                        fprintf(stderr, "[AudioCallback] Packet %zu: muxer is NULL\n", i);
+                        fflush(stderr);
+                        break;
+                    }
+                    
+                    bool written = m_streamMuxer->WriteAudioPacket(pkt);
+                    fprintf(stderr, "[AudioCallback] Packet %zu write=%s\n", i, written ? "true" : "false");
+                    fflush(stderr);
+                    
+                    if (written) {
+                        uint64_t newCount = m_audioPackets.fetch_add(1) + 1;
+                        fprintf(stderr, "[AudioCallback] Audio packets now: %llu\n", newCount);
+                        fflush(stderr);
+                        
+                        // Detect gaps in audio packets (packets not being written)
+                        if (newCount % 50 == 0) {
+                            uint64_t expectedPackets = m_audioFramesEncoded.load() / 256;  // Rough estimate
+                            if (newCount < expectedPackets / 2) {
+                                fprintf(stderr, "[AudioCallback] WARNING: Audio packet gap detected! Expected ~%llu, got %llu\n",
+                                        expectedPackets, newCount);
+                                fflush(stderr);
+                            }
+                        }
+                    } else {
+                        fprintf(stderr, "[AudioCallback] Packet %zu NOT written (buffer full?)\n", i);
+                        fflush(stderr);
+                    }
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "[AudioCallback] Packet %zu exception: %s\n", i, e.what());
+                    fflush(stderr);
+                } catch (const _com_error& e) {
+                    fprintf(stderr, "[AudioCallback] Packet %zu COM error: 0x%08lx - %s\n", i, e.Error(), e.ErrorMessage());
+                    fflush(stderr);
+                } catch (...) {
+                    fprintf(stderr, "[AudioCallback] Packet %zu unknown exception\n", i);
+                    fflush(stderr);
+                }
+            }
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[AudioCallback] Encode exception: %s\n", e.what());
+            fflush(stderr);
+        } catch (...) {
+            fprintf(stderr, "[AudioCallback] Encode unknown exception\n");
+            fflush(stderr);
         }
     });
 
@@ -237,126 +335,663 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
 /* ========================================================= */
 
 Napi::Value VideoAudioStreamerAddon::Start(const Napi::CallbackInfo& info) {
-    if (m_isRunning) return Napi::Boolean::New(info.Env(), false);
+    fprintf(stderr, "[Start] BEGIN\n");
+    if (m_isRunning) {
+        fprintf(stderr, "[Start] Already running, returning false\n");
+        return Napi::Boolean::New(info.Env(), false);
+    }
 
+    fprintf(stderr, "[Start] Setting flags\n");
     m_shouldStop = false;
     m_isRunning = true;
 
+    fprintf(stderr, "[Start] Starting audio capture\n");
     m_audioCapture->Start();
+    
+    fprintf(stderr, "[Start] Starting audio engine\n");
     m_audioEngine->Start();
+    
+    fprintf(stderr, "[Start] Starting video engine\n");
+    m_videoEngine->Start();
 
-    // DEBUG: Test CaptureThread only
-    m_captureThread  = std::thread(&VideoAudioStreamerAddon::CaptureThread, this);
-    // m_audioTickThread = std::thread(&VideoAudioStreamerAddon::AudioTickThread, this);
-    // m_networkThread  = std::thread(&VideoAudioStreamerAddon::NetworkSendThread, this);
-
+    fprintf(stderr, "[Start] Spawning capture thread\n");
+    fflush(stderr);
+    if (m_enableCaptureThread) {
+        m_captureThread = std::thread(&VideoAudioStreamerAddon::CaptureThread, this);
+        fprintf(stderr, "[Start] ✓ CaptureThread spawned\n");
+    } else {
+        fprintf(stderr, "[Start] ✗ CaptureThread DISABLED\n");
+    }
+    fflush(stderr);
+    
+    fprintf(stderr, "[Start] Spawning video tick thread\n");
+    fflush(stderr);
+    if (m_enableVideoTickThread) {
+        m_videoTickThread = std::thread(&VideoAudioStreamerAddon::VideoTickThread, this);
+        fprintf(stderr, "[Start] ✓ VideoTickThread spawned\n");
+    } else {
+        fprintf(stderr, "[Start] ✗ VideoTickThread DISABLED\n");
+    }
+    fflush(stderr);
+    
+    fprintf(stderr, "[Start] Spawning audio tick thread\n");
+    fflush(stderr);
+    if (m_enableAudioTickThread) {
+        m_audioTickThread = std::thread(&VideoAudioStreamerAddon::AudioTickThread, this);
+        fprintf(stderr, "[Start] ✓ AudioTickThread spawned\n");
+    } else {
+        fprintf(stderr, "[Start] ✗ AudioTickThread DISABLED\n");
+    }
+    fflush(stderr);
+    
+    fprintf(stderr, "[Start] Spawning network send thread\n");
+    fflush(stderr);
+    if (m_enableNetworkSendThread) {
+        m_networkThread = std::thread(&VideoAudioStreamerAddon::NetworkSendThread, this);
+        fprintf(stderr, "[Start] ✓ NetworkSendThread spawned\n");
+    } else {
+        fprintf(stderr, "[Start] ✗ NetworkSendThread DISABLED\n");
+    }
+    fflush(stderr);
+    
+    fprintf(stderr, "[Start] ALL THREADS SPAWNED SUCCESSFULLY\n");
     return Napi::Boolean::New(info.Env(), true);
 }
 
 Napi::Value VideoAudioStreamerAddon::Stop(const Napi::CallbackInfo& info) {
     m_shouldStop = true;
     m_isRunning = false;
+    
+    if (m_videoEngine) m_videoEngine->Stop();
+    
+    if (m_captureThread.joinable()) m_captureThread.join();
+    if (m_videoTickThread.joinable()) m_videoTickThread.join();
+    if (m_audioTickThread.joinable()) m_audioTickThread.join();
+    if (m_networkThread.joinable()) m_networkThread.join();
+    
     return Napi::Boolean::New(info.Env(), true);
 }
 
 /* ========================================================= */
 
 void VideoAudioStreamerAddon::CaptureThread() {
-    fprintf(stderr, "[CaptureThread] Starting\n");
-    if (!m_videoEncoder || !m_streamMuxer) {
-        fprintf(stderr, "[CaptureThread] NULL component\n");
-        return;
-    }
+    fprintf(stderr, "[CaptureThread] === STARTED === (shouldStop=%d)\n", m_shouldStop.load());
+    fflush(stderr);
     
-    // Check if we're using injected frames or real desktop capture
-    bool useRealCapture = m_desktop && !m_useInjectedFrames;
-    
-    if (useRealCapture && !m_desktop) {
-        fprintf(stderr, "[CaptureThread] DesktopDuplication not initialized\n");
-        return;
-    }
-    
-    std::vector<uint8_t> frame(m_width * m_height * 4);
-    
-    // Frame pacing: only capture when it's time for the next frame
-    auto startTime = std::chrono::high_resolution_clock::now();
-    uint64_t frameNumber = 0;
-    const int64_t frameIntervalNs = static_cast<int64_t>(1000000000.0 / m_fps);
+    try {
+        fprintf(stderr, "[CaptureThread] Checking components\n");
+        fflush(stderr);
+        if (!m_videoEncoder || !m_videoEngine) {
+            fprintf(stderr, "[CaptureThread] NULL component: encoder=%p, engine=%p\n", m_videoEncoder.get(), m_videoEngine.get());
+            fflush(stderr);
+            return;
+        }
+        
+        bool useRealCapture = m_desktop && !m_useInjectedFrames;
+        fprintf(stderr, "[CaptureThread] useRealCapture=%d, desktop=%p, useInjected=%d\n", useRealCapture, m_desktop.get(), m_useInjectedFrames);
+        fflush(stderr);
+        
+        if (useRealCapture && !m_desktop) {
+            fprintf(stderr, "[CaptureThread] DesktopDuplication not initialized\n");
+            fflush(stderr);
+            return;
+        }
+        
+        std::vector<uint8_t> frame(m_width * m_height * 4);
+        fprintf(stderr, "[CaptureThread] Allocated frame buffer: %ux%u = %zu bytes\n", m_width, m_height, frame.size());
+        fflush(stderr);
 
-    fprintf(stderr, "[CaptureThread] Loop starting, frameInterval=%lld ns\n", frameIntervalNs);
-
-    while (!m_shouldStop) {
-        auto currentTime = std::chrono::high_resolution_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(currentTime - startTime).count();
-        int64_t expectedFrame = elapsed / frameIntervalNs;
-
-        if (frameNumber < expectedFrame) {
-            bool frameReady = false;
-            
-            if (m_useInjectedFrames) {
-                fprintf(stderr, "[CaptureThread] Checking for injected frame, hasFrame=%d\n", m_hasInjectedFrame);
-                // Use injected frame for testing
-                {
-                    std::lock_guard<std::mutex> lock(m_injectedFrameMutex);
-                    if (m_hasInjectedFrame) {
-                        fprintf(stderr, "[CaptureThread] Copying injected frame\n");
-                        std::copy(m_injectedFrameBuffer.begin(), m_injectedFrameBuffer.end(), frame.begin());
-                        m_hasInjectedFrame = false;
-                        frameReady = true;
+        int loopCount = 0;
+        while (!m_shouldStop) {
+            loopCount++;
+            try {
+                fprintf(stderr, "[CaptureThread] Loop %d: START\n", loopCount);
+                fflush(stderr);
+                
+                bool frameReady = false;
+                
+                if (m_useInjectedFrames) {
+                    fprintf(stderr, "[CaptureThread] Loop %d: Trying injected frame mode\n", loopCount);
+                    fflush(stderr);
+                    try {
+                        {
+                            std::lock_guard<std::mutex> lock(m_injectedFrameMutex);
+                            fprintf(stderr, "[CaptureThread] Loop %d: Acquired injected frame lock\n", loopCount);
+                            fflush(stderr);
+                            if (m_hasInjectedFrame) {
+                                fprintf(stderr, "[CaptureThread] Loop %d: Copying injected frame\n", loopCount);
+                                fflush(stderr);
+                                std::copy(m_injectedFrameBuffer.begin(), m_injectedFrameBuffer.end(), frame.begin());
+                                fprintf(stderr, "[CaptureThread] Loop %d: Copy complete\n", loopCount);
+                                fflush(stderr);
+                                m_hasInjectedFrame = false;
+                                frameReady = true;
+                            }
+                        }
+                        fprintf(stderr, "[CaptureThread] Loop %d: Released injected frame lock\n", loopCount);
+                        fflush(stderr);
+                    } catch (const std::exception& e) {
+                        fprintf(stderr, "[CaptureThread] Loop %d: INJECTED FRAME EXCEPTION: %s\n", loopCount, e.what());
+                        fflush(stderr);
+                        break;
+                    } catch (...) {
+                        fprintf(stderr, "[CaptureThread] Loop %d: INJECTED FRAME UNKNOWN EXCEPTION\n", loopCount);
+                        fflush(stderr);
+                        break;
+                    }
+                } else if (useRealCapture) {
+                    fprintf(stderr, "[CaptureThread] Loop %d: Trying real desktop capture\n", loopCount);
+                    fflush(stderr);
+                    try {
+                        fprintf(stderr, "[CaptureThread] Loop %d: Calling m_desktop->CaptureFrame()\n", loopCount);
+                        fflush(stderr);
+                        uint32_t w, h;
+                        int64_t ts;
+                        if (m_desktop->CaptureFrame(frame.data(), &w, &h, &ts)) {
+                            fprintf(stderr, "[CaptureThread] Loop %d: CaptureFrame returned true\n", loopCount);
+                            fflush(stderr);
+                            frameReady = true;
+                        } else {
+                            fprintf(stderr, "[CaptureThread] Loop %d: CaptureFrame returned false\n", loopCount);
+                            fflush(stderr);
+                        }
+                    } catch (const std::exception& e) {
+                        fprintf(stderr, "[CaptureThread] Loop %d: DESKTOP CAPTURE EXCEPTION: %s\n", loopCount, e.what());
+                        fflush(stderr);
+                        break;
+                    } catch (...) {
+                        fprintf(stderr, "[CaptureThread] Loop %d: DESKTOP CAPTURE UNKNOWN EXCEPTION\n", loopCount);
+                        fflush(stderr);
+                        break;
                     }
                 }
-            } else if (useRealCapture) {
-                // Use real desktop capture
-                uint32_t w, h;
-                int64_t ts;
-                if (m_desktop->CaptureFrame(frame.data(), &w, &h, &ts)) {
-                    frameReady = true;
+                
+                fprintf(stderr, "[CaptureThread] Loop %d: frameReady=%d\n", loopCount, frameReady ? 1 : 0);
+                fflush(stderr);
+                
+                if (frameReady) {
+                    fprintf(stderr, "[CaptureThread] Loop %d: Calling m_videoEngine->PushFrame()\n", loopCount);
+                    fflush(stderr);
+                    try {
+                        m_videoEngine->PushFrame(frame.data());
+                        fprintf(stderr, "[CaptureThread] Loop %d: PushFrame() succeeded\n", loopCount);
+                        fflush(stderr);
+                    } catch (const std::exception& e) {
+                        fprintf(stderr, "[CaptureThread] Loop %d: PUSHFRAME EXCEPTION: %s\n", loopCount, e.what());
+                        fflush(stderr);
+                        break;
+                    } catch (...) {
+                        fprintf(stderr, "[CaptureThread] Loop %d: PUSHFRAME UNKNOWN EXCEPTION\n", loopCount);
+                        fflush(stderr);
+                        break;
+                    }
+                    
+                    fprintf(stderr, "[CaptureThread] Loop %d: Incrementing video frame count\n", loopCount);
+                    fflush(stderr);
+                    m_videoFrames.fetch_add(1);
+                    fprintf(stderr, "[CaptureThread] Loop %d: Video frame count updated to %llu\n", loopCount, m_videoFrames.load());
+                    fflush(stderr);
+                    
+                    if (loopCount % 10 == 0) {
+                        fprintf(stderr, "[CaptureThread] Loop %d: Pushed frame to engine (total=%llu)\n", loopCount, m_videoFrames.load());
+                        fflush(stderr);
+                    }
+                } else {
+                    if (loopCount % 100 == 0) {
+                        fprintf(stderr, "[CaptureThread] Loop %d: No frame ready, sleeping 1ms\n", loopCount);
+                        fflush(stderr);
+                    }
+                    fprintf(stderr, "[CaptureThread] Loop %d: Sleeping\n", loopCount);
+                    fflush(stderr);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    fprintf(stderr, "[CaptureThread] Loop %d: Wake from sleep\n", loopCount);
+                    fflush(stderr);
                 }
+                fprintf(stderr, "[CaptureThread] Loop %d: END\n", loopCount);
+                fflush(stderr);
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[CaptureThread] Loop %d: INNER EXCEPTION: %s\n", loopCount, e.what());
+                fflush(stderr);
+                break;
+            } catch (...) {
+                fprintf(stderr, "[CaptureThread] Loop %d: INNER UNKNOWN EXCEPTION\n", loopCount);
+                fflush(stderr);
+                break;
             }
-            
-            if (frameReady) {
-                fprintf(stderr, "[CaptureThread] Encoding frame %llu\n", frameNumber);
-                auto packets = m_videoEncoder->EncodeFrame(frame.data());
-                for (auto& p : packets) {
-                    if (m_streamMuxer->WriteVideoPacket(&p, frameNumber))
-                        m_videoPackets.fetch_add(1);
-                }
-                m_videoFrames.fetch_add(1);
-                frameNumber++;
-            }
-        } else {
-            // Wait a bit to avoid busy waiting
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+        fprintf(stderr, "[CaptureThread] Exited loop after %d iterations (shouldStop=%d)\n", loopCount, m_shouldStop.load());
+        fflush(stderr);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[CaptureThread] OUTER EXCEPTION: %s\n", e.what());
+        fflush(stderr);
+    } catch (...) {
+        fprintf(stderr, "[CaptureThread] OUTER UNKNOWN EXCEPTION\n");
+        fflush(stderr);
     }
-    fprintf(stderr, "[CaptureThread] Exiting\n");
+    fprintf(stderr, "[CaptureThread] === FINISHED === (shouldStop=%d, isRunning=%d)\n", m_shouldStop.load(), m_isRunning.load());
+    fflush(stderr);
+}
+
+void VideoAudioStreamerAddon::VideoTickThread() {
+    fprintf(stderr, "[VideoTickThread] === STARTED === (shouldStop=%d)\n", m_shouldStop.load());
+    fflush(stderr);
+    
+    try {
+        fprintf(stderr, "[VideoTickThread] Checking components\n");
+        fflush(stderr);
+        if (!m_videoEngine || !m_videoEncoder || !m_streamMuxer) {
+            fprintf(stderr, "[VideoTickThread] NULL component: engine=%p, encoder=%p, muxer=%p\n", 
+                    m_videoEngine.get(), m_videoEncoder.get(), m_streamMuxer.get());
+            fflush(stderr);
+            return;
+        }
+
+        std::vector<uint8_t> frame(m_width * m_height * 4);
+        fprintf(stderr, "[VideoTickThread] Allocated frame buffer: %ux%u = %zu bytes\n", m_width, m_height, frame.size());
+        fflush(stderr);
+        
+        int loopCount = 0;
+        while (!m_shouldStop) {
+            loopCount++;
+            try {
+                fprintf(stderr, "[VideoTickThread] Loop %d: START\n", loopCount);
+                fflush(stderr);
+                
+                // Get the frame number that should be encoded at this time
+                fprintf(stderr, "[VideoTickThread] Loop %d: Calling GetExpectedFrameNumber()\n", loopCount);
+                fflush(stderr);
+                uint64_t expectedFrame = m_videoEngine->GetExpectedFrameNumber();
+                fprintf(stderr, "[VideoTickThread] Loop %d: GetExpectedFrameNumber returned %llu\n", loopCount, expectedFrame);
+                fflush(stderr);
+                
+                fprintf(stderr, "[VideoTickThread] Loop %d: Calling GetFrameNumber()\n", loopCount);
+                fflush(stderr);
+                uint64_t currentFrame = m_videoEngine->GetFrameNumber();
+                fprintf(stderr, "[VideoTickThread] Loop %d: GetFrameNumber returned %llu\n", loopCount, currentFrame);
+                fflush(stderr);
+
+                if (loopCount % 20 == 0) {
+                    fprintf(stderr, "[VideoTickThread] Loop %d: expected=%llu, current=%llu\n", loopCount, expectedFrame, currentFrame);
+                    fflush(stderr);
+                }
+
+                if (currentFrame < expectedFrame) {
+                    // Time to encode another frame
+                    fprintf(stderr, "[VideoTickThread] Loop %d: Time to encode, calling PopFrameFromBuffer()\n", loopCount);
+                    fflush(stderr);
+                    
+                    bool hasFrame = false;
+                    try {
+                        hasFrame = m_videoEngine->PopFrameFromBuffer(frame);
+                        fprintf(stderr, "[VideoTickThread] Loop %d: PopFrameFromBuffer returned %d\n", loopCount, hasFrame ? 1 : 0);
+                        fflush(stderr);
+                    } catch (const std::exception& e) {
+                        fprintf(stderr, "[VideoTickThread] Loop %d: POPFRAME EXCEPTION: %s\n", loopCount, e.what());
+                        fflush(stderr);
+                        hasFrame = false;
+                    } catch (...) {
+                        fprintf(stderr, "[VideoTickThread] Loop %d: POPFRAME UNKNOWN EXCEPTION\n", loopCount);
+                        fflush(stderr);
+                        hasFrame = false;
+                    }
+                    
+                    // ✅ OBS-LIKE FRAME DUPLICATION: If no frame in buffer, use last frame
+                    if (!hasFrame) {
+                        fprintf(stderr, "[VideoTickThread] Loop %d: No frame in buffer, trying to use last frame\n", loopCount);
+                        fflush(stderr);
+                        try {
+                            if (m_videoEngine->GetLastFrame(frame)) {
+                                fprintf(stderr, "[VideoTickThread] Loop %d: Using duplicated last frame\n", loopCount);
+                                fflush(stderr);
+                                hasFrame = true;
+                            } else {
+                                fprintf(stderr, "[VideoTickThread] Loop %d: No last frame available, creating black frame\n", loopCount);
+                                fflush(stderr);
+                                // Fill with black (0x00)
+                                std::fill(frame.begin(), frame.end(), 0);
+                                hasFrame = true;
+                            }
+                        } catch (const std::exception& e) {
+                            fprintf(stderr, "[VideoTickThread] Loop %d: GETLASTFRAME EXCEPTION: %s\n", loopCount, e.what());
+                            fflush(stderr);
+                            // Still try to encode black frame
+                            std::fill(frame.begin(), frame.end(), 0);
+                            hasFrame = true;
+                        } catch (...) {
+                            fprintf(stderr, "[VideoTickThread] Loop %d: GETLASTFRAME UNKNOWN EXCEPTION\n", loopCount);
+                            fflush(stderr);
+                            std::fill(frame.begin(), frame.end(), 0);
+                            hasFrame = true;
+                        }
+                    }
+                    
+                    if (hasFrame) {
+                        fprintf(stderr, "[VideoTickThread] Loop %d: Frame ready, calling EncodeFrame()\n", loopCount);
+                        fflush(stderr);
+                        
+                        // Frame data available (real or duplicated), encode it
+                        try {
+                            auto packets = m_videoEncoder->EncodeFrame(frame.data());
+                            fprintf(stderr, "[VideoTickThread] Loop %d: EncodeFrame returned %zu packets\n", loopCount, packets.size());
+                            fflush(stderr);
+                            
+                            for (size_t i = 0; i < packets.size(); i++) {
+                                fprintf(stderr, "[VideoTickThread] Loop %d: Writing packet %zu of %zu\n", loopCount, i, packets.size());
+                                fflush(stderr);
+                                
+                                try {
+                                    // Check muxer validity before writing
+                                    if (!m_streamMuxer) {
+                                        fprintf(stderr, "[VideoTickThread] Loop %d: muxer is NULL, skipping write\n", loopCount);
+                                        fflush(stderr);
+                                        break;
+                                    }
+                                    
+                                    auto& p = packets[i];
+                                    fprintf(stderr, "[VideoTickThread] Loop %d: Packet size=%zu, keyframe=%d\n", loopCount, p.data.size(), p.isKeyframe ? 1 : 0);
+                                    fflush(stderr);
+                                    
+                                    fprintf(stderr, "[VideoTickThread] Loop %d: Muxer state: connected=%d, backpressure=%d\n", 
+                                            loopCount, m_streamMuxer->IsConnected(), m_streamMuxer->IsBackpressure());
+                                    fflush(stderr);
+                                    
+                                    fprintf(stderr, "[VideoTickThread] Loop %d: Calling WriteVideoPacket[%zu] with muxer=%p\n", loopCount, i, m_streamMuxer.get());
+                                    fflush(stderr);
+                                    
+                                    bool written = m_streamMuxer->WriteVideoPacket(&p, currentFrame);
+                                    fprintf(stderr, "[VideoTickThread] Loop %d: WriteVideoPacket[%zu] returned=%s\n", loopCount, i, written ? "true" : "false");
+                                    fflush(stderr);
+                                    
+                                    if (written) {
+                                        fprintf(stderr, "[VideoTickThread] Loop %d: Incrementing video packet count\n", loopCount);
+                                        fflush(stderr);
+                                        m_videoPackets.fetch_add(1);
+                                        fprintf(stderr, "[VideoTickThread] Loop %d: Video packet count now %llu\n", loopCount, m_videoPackets.load());
+                                        fflush(stderr);
+                                    } else {
+                                        fprintf(stderr, "[VideoTickThread] Loop %d: WriteVideoPacket returned false (backpressure or buffer full?)\n", loopCount);
+                                        fflush(stderr);
+                                    }
+                                } catch (const std::exception& e) {
+                                    fprintf(stderr, "[VideoTickThread] Loop %d: WRITEPACKET[%zu] STD::EXCEPTION: %s\n", loopCount, i, e.what());
+                                    fflush(stderr);
+                                    // Don't break - try next packet
+                                } catch (const _com_error& e) {
+                                    fprintf(stderr, "[VideoTickThread] Loop %d: WRITEPACKET[%zu] COM_ERROR: 0x%08lx - %s\n", loopCount, i, e.Error(), e.ErrorMessage());
+                                    fflush(stderr);
+                                    // Don't break - try next packet
+                                } catch (...) {
+                                    fprintf(stderr, "[VideoTickThread] Loop %d: WRITEPACKET[%zu] UNKNOWN EXCEPTION (possibly COM)\n", loopCount, i);
+                                    fflush(stderr);
+                                    // Don't break - try next packet
+                                }
+                            }
+                        } catch (const std::exception& e) {
+                            fprintf(stderr, "[VideoTickThread] Loop %d: ENCODE EXCEPTION: %s\n", loopCount, e.what());
+                            fflush(stderr);
+                            break;
+                        } catch (...) {
+                            fprintf(stderr, "[VideoTickThread] Loop %d: ENCODE UNKNOWN EXCEPTION\n", loopCount);
+                            fflush(stderr);
+                            break;
+                        }
+                    }
+                    
+                    // ✅ CRITICAL FIX: Always advance frame number, regardless of frame availability
+                    fprintf(stderr, "[VideoTickThread] Loop %d: Calling AdvanceFrameNumber()\n", loopCount);
+                    fflush(stderr);
+                    try {
+                        m_videoEngine->AdvanceFrameNumber();
+                        fprintf(stderr, "[VideoTickThread] Loop %d: AdvanceFrameNumber() succeeded (now at %llu)\n", loopCount, m_videoEngine->GetFrameNumber());
+                        fflush(stderr);
+                    } catch (const std::exception& e) {
+                        fprintf(stderr, "[VideoTickThread] Loop %d: ADVANCEFRAME EXCEPTION: %s\n", loopCount, e.what());
+                        fflush(stderr);
+                        break;
+                    } catch (...) {
+                        fprintf(stderr, "[VideoTickThread] Loop %d: ADVANCEFRAME UNKNOWN EXCEPTION\n", loopCount);
+                        fflush(stderr);
+                        break;
+                    }
+                } else {
+                    // No frame time yet, wait a bit
+                    if (loopCount % 50 == 0) {
+                        fprintf(stderr, "[VideoTickThread] Loop %d: No frame time yet, sleeping 5ms\n", loopCount);
+                        fflush(stderr);
+                    }
+                    fprintf(stderr, "[VideoTickThread] Loop %d: Sleeping\n", loopCount);
+                    fflush(stderr);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    fprintf(stderr, "[VideoTickThread] Loop %d: Wake from sleep\n", loopCount);
+                    fflush(stderr);
+                }
+                fprintf(stderr, "[VideoTickThread] Loop %d: END\n", loopCount);
+                fflush(stderr);
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[VideoTickThread] Loop %d: EXCEPTION: %s\n", loopCount, e.what());
+                fflush(stderr);
+                break;
+            } catch (...) {
+                fprintf(stderr, "[VideoTickThread] Loop %d: UNKNOWN EXCEPTION\n", loopCount);
+                fflush(stderr);
+                break;
+            }
+        }
+        fprintf(stderr, "[VideoTickThread] Exited loop after %d iterations (shouldStop=%d)\n", loopCount, m_shouldStop.load());
+        fflush(stderr);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[VideoTickThread] OUTER EXCEPTION: %s\n", e.what());
+        fflush(stderr);
+    } catch (...) {
+        fprintf(stderr, "[VideoTickThread] OUTER UNKNOWN EXCEPTION\n");
+        fflush(stderr);
+    }
+    fprintf(stderr, "[VideoTickThread] === FINISHED === (shouldStop=%d, videoPackets=%llu)\n", m_shouldStop.load(), m_videoPackets.load());
+    fflush(stderr);
 }
 
 void VideoAudioStreamerAddon::AudioTickThread() {
-    if (!m_audioEngine) {
-        fprintf(stderr, "[AudioTickThread] NULL audioEngine\n");
-        return;
-    }
+    fprintf(stderr, "[AudioTickThread] === STARTED === (shouldStop=%d)\n", m_shouldStop.load());
+    fflush(stderr);
     
-    while (!m_shouldStop && m_audioEngine->IsRunning()) {
-        m_audioEngine->Tick();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    try {
+        fprintf(stderr, "[AudioTickThread] Checking components\n");
+        fflush(stderr);
+        if (!m_audioEngine) {
+            fprintf(stderr, "[AudioTickThread] NULL component: audioEngine=%p\n", m_audioEngine.get());
+            fflush(stderr);
+            return;
+        }
+
+        int tickCount = 0;
+        while (!m_shouldStop) {
+            tickCount++;
+            try {
+                fprintf(stderr, "[AudioTickThread] Loop %d: START\n", tickCount);
+                fflush(stderr);
+                
+                fprintf(stderr, "[AudioTickThread] Loop %d: Checking m_audioEngine pointer\n", tickCount);
+                fflush(stderr);
+                
+                if (!m_audioEngine) {
+                    fprintf(stderr, "[AudioTickThread] Loop %d: audioEngine became NULL mid-loop\n", tickCount);
+                    fflush(stderr);
+                    break;
+                }
+                fprintf(stderr, "[AudioTickThread] Loop %d: m_audioEngine pointer is valid (%p)\n", tickCount, m_audioEngine.get());
+                fflush(stderr);
+                
+                fprintf(stderr, "[AudioTickThread] Loop %d: Calling IsRunning()\n", tickCount);
+                fflush(stderr);
+                bool isRunning = false;
+                try {
+                    isRunning = m_audioEngine->IsRunning();
+                    fprintf(stderr, "[AudioTickThread] Loop %d: IsRunning() returned %d\n", tickCount, isRunning ? 1 : 0);
+                    fflush(stderr);
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "[AudioTickThread] Loop %d: ISRUNNING EXCEPTION: %s\n", tickCount, e.what());
+                    fflush(stderr);
+                    break;
+                } catch (...) {
+                    fprintf(stderr, "[AudioTickThread] Loop %d: ISRUNNING UNKNOWN EXCEPTION\n", tickCount);
+                    fflush(stderr);
+                    break;
+                }
+                
+                if (!isRunning) {
+                    fprintf(stderr, "[AudioTickThread] Loop %d: AudioEngine not running, exiting loop\n", tickCount);
+                    fflush(stderr);
+                    break;
+                }
+                
+                fprintf(stderr, "[AudioTickThread] Loop %d: Calling Tick()\n", tickCount);
+                fflush(stderr);
+                try {
+                    m_audioEngine->Tick();
+                    fprintf(stderr, "[AudioTickThread] Loop %d: Tick() completed successfully\n", tickCount);
+                    fflush(stderr);
+                } catch (const std::exception& e) {
+                    fprintf(stderr, "[AudioTickThread] Loop %d: TICK EXCEPTION: %s\n", tickCount, e.what());
+                    fflush(stderr);
+                    break;
+                } catch (...) {
+                    fprintf(stderr, "[AudioTickThread] Loop %d: TICK UNKNOWN EXCEPTION\n", tickCount);
+                    fflush(stderr);
+                    break;
+                }
+                
+                if (tickCount % 50 == 0) {
+                    fprintf(stderr, "[AudioTickThread] Loop %d: Audio ticks=%d, packets=%llu\n", tickCount, tickCount, m_audioPackets.load());
+                    fflush(stderr);
+                }
+                
+                fprintf(stderr, "[AudioTickThread] Loop %d: About to sleep 10ms\n", tickCount);
+                fflush(stderr);
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                fprintf(stderr, "[AudioTickThread] Loop %d: Woke from sleep\n", tickCount);
+                fflush(stderr);
+                
+                fprintf(stderr, "[AudioTickThread] Loop %d: END\n", tickCount);
+                fflush(stderr);
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[AudioTickThread] Loop %d: EXCEPTION: %s\n", tickCount, e.what());
+                fflush(stderr);
+                break;
+            } catch (...) {
+                fprintf(stderr, "[AudioTickThread] Loop %d: UNKNOWN EXCEPTION (likely COM/Windows exception)\n", tickCount);
+                fprintf(stderr, "[AudioTickThread] Loop %d: m_audioEngine ptr=%p, shouldStop=%d\n", 
+                        tickCount, m_audioEngine.get(), m_shouldStop.load());
+                fflush(stderr);
+                break;
+            }
+        }
+        fprintf(stderr, "[AudioTickThread] Exited loop after %d ticks (shouldStop=%d)\n", tickCount, m_shouldStop.load());
+        fflush(stderr);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[AudioTickThread] OUTER EXCEPTION: %s\n", e.what());
+        fflush(stderr);
+    } catch (...) {
+        fprintf(stderr, "[AudioTickThread] OUTER UNKNOWN EXCEPTION\n");
+        fflush(stderr);
     }
+    fprintf(stderr, "[AudioTickThread] === FINISHED === (shouldStop=%d, audioPackets=%llu)\n", m_shouldStop.load(), m_audioPackets.load());
+    fflush(stderr);
 }
 
 void VideoAudioStreamerAddon::NetworkSendThread() {
+    fprintf(stderr, "[NetworkSendThread] === STARTED ===\n");
+    fflush(stderr);
+    
     if (!m_streamMuxer) {
-        fprintf(stderr, "[NetworkSendThread] NULL streamMuxer\n");
+        fprintf(stderr, "[NetworkSendThread] FATAL: NULL streamMuxer\n");
+        fflush(stderr);
         return;
     }
     
+    fprintf(stderr, "[NetworkSendThread] Checking muxer state...\n");
+    fflush(stderr);
+    fprintf(stderr, "[NetworkSendThread] IsConnected=%d, IsBackpressure=%d\n", 
+            m_streamMuxer->IsConnected(), m_streamMuxer->IsBackpressure());
+    fflush(stderr);
+    
+    int sendAttempts = 0;
+    int successCount = 0;
+    int failureCount = 0;
+    int loopCount = 0;
+    
     while (!m_shouldStop) {
-        bool sent;
-        do {
-            sent = m_streamMuxer->SendNextBufferedPacket();
-        } while (sent);
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        loopCount++;
+        try {
+            // Check muxer state periodically
+            if (loopCount % 1000 == 0) {
+                fprintf(stderr, "[NetworkSendThread] Loop %d: Connected=%d, Backpressure=%d, Attempts=%d, Success=%d, Failed=%d\n",
+                        loopCount, m_streamMuxer->IsConnected(), m_streamMuxer->IsBackpressure(),
+                        sendAttempts, successCount, failureCount);
+                fflush(stderr);
+            }
+            
+            // Try to send packet
+            try {
+                if (!m_streamMuxer) {
+                    fprintf(stderr, "[NetworkSendThread] Loop %d: muxer became NULL\n", loopCount);
+                    fflush(stderr);
+                    break;
+                }
+                
+                bool sent = m_streamMuxer->SendNextBufferedPacket();
+                sendAttempts++;
+                
+                if (sent) {
+                    successCount++;
+                    if (successCount % 50 == 0) {
+                        fprintf(stderr, "[NetworkSendThread] Sent %d packets successfully\n", successCount);
+                        fflush(stderr);
+                    }
+                } else {
+                    // No packet available, sleep briefly
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
+            } catch (const std::exception& e) {
+                failureCount++;
+                if (failureCount % 100 == 0) {
+                    fprintf(stderr, "[NetworkSendThread] SendNextBufferedPacket exception (count=%d): %s\n", 
+                            failureCount, e.what());
+                    fflush(stderr);
+                }
+            } catch (const _com_error& e) {
+                failureCount++;
+                if (failureCount % 100 == 0) {
+                    fprintf(stderr, "[NetworkSendThread] SendNextBufferedPacket COM error (count=%d): 0x%08lx - %s\n",
+                            failureCount, e.Error(), e.ErrorMessage());
+                    fflush(stderr);
+                }
+            } catch (...) {
+                failureCount++;
+                if (failureCount % 100 == 0) {
+                    fprintf(stderr, "[NetworkSendThread] SendNextBufferedPacket unknown exception (count=%d)\n", failureCount);
+                    fflush(stderr);
+                }
+            }
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[NetworkSendThread] Loop %d OUTER STD::EXCEPTION: %s\n", loopCount, e.what());
+            fflush(stderr);
+            // Continue on exception, don't break
+        } catch (const _com_error& e) {
+            fprintf(stderr, "[NetworkSendThread] Loop %d OUTER COM_ERROR: 0x%08lx - %s\n", loopCount, e.Error(), e.ErrorMessage());
+            fflush(stderr);
+            // Continue on exception, don't break
+        } catch (...) {
+            // Silently continue on unknown exception - likely thread/COM cleanup
+            if (loopCount % 1000 == 0) {
+                fprintf(stderr, "[NetworkSendThread] Loop %d OUTER UNKNOWN EXCEPTION (continuing...)\n", loopCount);
+                fflush(stderr);
+            }
+        }
     }
+    
+    fprintf(stderr, "[NetworkSendThread] === EXITING === (Loops=%d, Attempts=%d, Success=%d, Failed=%d)\n", 
+            loopCount, sendAttempts, successCount, failureCount);
+    fflush(stderr);
 }
 
 /* ========================================================= */
@@ -421,12 +1056,30 @@ Napi::Value VideoAudioStreamerAddon::InjectFrame(const Napi::CallbackInfo& info)
 
 void VideoAudioStreamerAddon::Cleanup() {
     m_desktop.reset();
+    m_videoEngine.reset();
     m_videoEncoder.reset();
     m_streamMuxer.reset();
     m_buffer.reset();
     m_audioCapture.reset();
     m_audioEngine.reset();
     m_audioEncoder.reset();
+}
+
+Napi::Value VideoAudioStreamerAddon::SetThreadConfig(const Napi::CallbackInfo& info) {
+    if (info.Length() < 3) {
+        Napi::Error::New(info.Env(), "Expected 3 arguments: capture, videoTick, audioTick").ThrowAsJavaScriptException();
+        return info.Env().Null();
+    }
+    
+    m_enableCaptureThread = info[0].As<Napi::Boolean>().Value();
+    m_enableVideoTickThread = info[1].As<Napi::Boolean>().Value();
+    m_enableAudioTickThread = info[2].As<Napi::Boolean>().Value();
+    
+    fprintf(stderr, "[SetThreadConfig] Capture=%d, VideoTick=%d, AudioTick=%d\n",
+            m_enableCaptureThread, m_enableVideoTickThread, m_enableAudioTickThread);
+    fflush(stderr);
+    
+    return Napi::Boolean::New(info.Env(), true);
 }
 
 /* ========================================================= */

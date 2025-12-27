@@ -90,6 +90,12 @@ public:
     bool PopFrameFromBuffer(std::vector<uint8_t>& outFrame);
 
     /**
+     * Get last captured frame (for frame duplication on lag)
+     * Returns true if a last frame exists
+     */
+    bool GetLastFrame(std::vector<uint8_t>& outFrame) const;
+
+    /**
      * Get statistics
      */
     uint64_t GetFramesEncoded() const { return m_framesEncoded; }

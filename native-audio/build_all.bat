@@ -88,8 +88,8 @@ echo [3/3] Copying FFmpeg DLLs to build output (Node.js)...
 set BUILD_OUTPUT=build\Release
 call :copy_ffmpeg_dlls
 
-if not exist "%BUILD_OUTPUT%\wasapi_capture.node" (
-    echo ERROR: Compiled module not found at %BUILD_OUTPUT%\wasapi_capture.node
+if not exist "%BUILD_OUTPUT%\wasapi_video_audio.node" (
+    echo ERROR: Compiled module not found at %BUILD_OUTPUT%\wasapi_video_audio.node
     pause
     exit /b 1
 )
@@ -99,14 +99,14 @@ echo ========================================
 echo Node.js build completed successfully!
 echo ========================================
 echo.
-echo Output: %BUILD_OUTPUT%\wasapi_capture.node
+echo Output: %BUILD_OUTPUT%\wasapi_video_audio.node
 echo.
 
 REM Save Node.js build before Electron build overwrites it
-if exist "%BUILD_OUTPUT%\wasapi_capture.node" (
+if exist "%BUILD_OUTPUT%\wasapi_video_audio.node" (
     echo Saving Node.js build...
     if not exist "build\Release-NodeJS" mkdir "build\Release-NodeJS"
-    copy /Y "%BUILD_OUTPUT%\wasapi_capture.node" "build\Release-NodeJS\wasapi_capture.node" >nul 2>&1
+    copy /Y "%BUILD_OUTPUT%\wasapi_video_audio.node" "build\Release-NodeJS\wasapi_video_audio.node" >nul 2>&1
     if exist "%BUILD_OUTPUT%\*.dll" (
         copy /Y "%BUILD_OUTPUT%\*.dll" "build\Release-NodeJS\" >nul 2>&1
     )
@@ -163,8 +163,8 @@ REM Copy FFmpeg DLLs to output directory (Electron build)
 echo [3/3] Copying FFmpeg DLLs to build output (Electron)...
 call :copy_ffmpeg_dlls
 
-if not exist "%BUILD_OUTPUT%\wasapi_capture.node" (
-    echo ERROR: Compiled module not found at %BUILD_OUTPUT%\wasapi_capture.node
+if not exist "%BUILD_OUTPUT%\wasapi_video_audio.node" (
+    echo ERROR: Compiled module not found at %BUILD_OUTPUT%\wasapi_video_audio.node
     pause
     exit /b 1
 )
@@ -174,7 +174,7 @@ echo ========================================
 echo Electron build completed successfully!
 echo ========================================
 echo.
-echo Output: %BUILD_OUTPUT%\wasapi_capture.node
+echo Output: %BUILD_OUTPUT%\wasapi_video_audio.node
 echo Compiled for Electron 28.0.0
 echo.
 

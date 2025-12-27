@@ -169,11 +169,12 @@ std::vector<EncodedAudioPacket> AudioEncoder::EncodeFrames(const float* pcmData,
         // Receive encoded packets
         AVPacket* avPacket = av_packet_alloc();
         while (avcodec_receive_packet(m_codecContext, avPacket) == 0) {
-            // Create EncodedAudioPacket (BYTES ONLY, no timestamps)
-            // The muxer assigns all timestamps
+            // Create EncodedAudioPacket (BYTES + SAMPLE COUNT)
+            // numSamples is CRITICAL for StreamMuxer to compute correct PTS
+            // AAC encoder always outputs exactly frameSize samples per packet
             std::vector<uint8_t> packetData(avPacket->data, avPacket->data + avPacket->size);
             
-            EncodedAudioPacket packet(packetData);
+            EncodedAudioPacket packet(packetData, static_cast<int64_t>(frameSize));
             packets.push_back(packet);
 
             m_packetCount++;

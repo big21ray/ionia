@@ -81,7 +81,7 @@ bool DesktopDuplication::InitializeD3D() {
     m_desktopWidth = m_outputDesc.DesktopCoordinates.right - m_outputDesc.DesktopCoordinates.left;
     m_desktopHeight = m_outputDesc.DesktopCoordinates.bottom - m_outputDesc.DesktopCoordinates.top;
 
-    // Create D3D11 device
+    // Create D3D11 device - IMPORTANT: Use D3D_DRIVER_TYPE_HARDWARE with the adapter
     D3D_FEATURE_LEVEL featureLevels[] = {
         D3D_FEATURE_LEVEL_11_1,
         D3D_FEATURE_LEVEL_11_0,
@@ -92,7 +92,7 @@ bool DesktopDuplication::InitializeD3D() {
     D3D_FEATURE_LEVEL featureLevel;
     hr = D3D11CreateDevice(
         m_adapter.Get(),
-        D3D_DRIVER_TYPE_UNKNOWN,
+        D3D_DRIVER_TYPE_HARDWARE,  // CRITICAL: Must be HARDWARE when using a specific adapter
         nullptr,
         0,
         featureLevels,
@@ -104,10 +104,28 @@ bool DesktopDuplication::InitializeD3D() {
     );
 
     if (FAILED(hr)) {
-        fprintf(stderr, "[DesktopDuplication] D3D11CreateDevice failed: 0x%08X\n", hr);
-        return false;
+        fprintf(stderr, "[DesktopDuplication] D3D11CreateDevice with HARDWARE failed: 0x%08X, trying UNKNOWN\n", hr);
+        // Fallback to D3D_DRIVER_TYPE_UNKNOWN
+        hr = D3D11CreateDevice(
+            m_adapter.Get(),
+            D3D_DRIVER_TYPE_UNKNOWN,
+            nullptr,
+            0,
+            featureLevels,
+            ARRAYSIZE(featureLevels),
+            D3D11_SDK_VERSION,
+            &m_device,
+            &featureLevel,
+            &m_context
+        );
+        
+        if (FAILED(hr)) {
+            fprintf(stderr, "[DesktopDuplication] D3D11CreateDevice failed: 0x%08X\n", hr);
+            return false;
+        }
     }
 
+    fprintf(stderr, "[DesktopDuplication] D3D device created successfully\n");
     return true;
 }
 

@@ -1,7 +1,7 @@
 {
   "targets": [
     {
-      "target_name": "wasapi_capture",
+      "target_name": "wasapi_video_audio",
       "sources": [
         "src/wasapi_capture.cpp",
         "src/audio_capture.cpp",

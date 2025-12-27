@@ -128,3 +128,11 @@ uint64_t VideoEngine::GetExpectedFrameNumber() const {
 bool VideoEngine::PopFrameFromBuffer(std::vector<uint8_t>& outFrame) {
     return PopFrameFromBufferInternal(outFrame);
 }
+
+bool VideoEngine::GetLastFrame(std::vector<uint8_t>& outFrame) const {
+    if (!m_hasLastFrame || m_lastFrame.empty()) {
+        return false;
+    }
+    outFrame = m_lastFrame;
+    return true;
+}

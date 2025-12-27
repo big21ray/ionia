@@ -4,7 +4,7 @@
  * Records microphone audio with VideoEngine clock master
  */
 
-const WasapiCapture = require('./build/Release/wasapi_capture.node');
+const WasapiCapture = require('./index.js');
 const path = require('path');
 const fs = require('fs');
 

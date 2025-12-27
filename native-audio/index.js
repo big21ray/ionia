@@ -9,9 +9,9 @@ const isDev = process.env.NODE_ENV === 'development';
 
 // Try to load the native module
 const possiblePaths = [
-  path.join(__dirname, 'build/Release/wasapi_capture.node'),
-  path.join(__dirname, 'build/Debug/wasapi_capture.node'),
-  path.join(__dirname, 'wasapi_capture.node'),
+  path.join(__dirname, 'build/Release/wasapi_video_audio.node'),
+  path.join(__dirname, 'build/Debug/wasapi_video_audio.node'),
+  path.join(__dirname, 'wasapi_video_audio.node'),
 ];
 
 let lastError = null;

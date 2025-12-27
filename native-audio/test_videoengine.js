@@ -34,7 +34,7 @@ async function main() {
             5000000,     // Video bitrate (5 Mbps)
             false,       // Use NVENC
             128000,      // Audio bitrate (128 kbps)
-            'desktop'    // Audio mode: desktop, mic, or both
+            'both'       // Audio mode: desktop, mic, or both
         );
         
         if (!initialized) {
