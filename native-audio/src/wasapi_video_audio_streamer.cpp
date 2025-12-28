@@ -246,6 +246,17 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
     m_audioEncoder = std::make_unique<AudioEncoder>();
     m_audioEncoder->Initialize(AudioEngine::SAMPLE_RATE, AudioEngine::CHANNELS, m_audioBitrate);
 
+    // DIAGNOSTIC: Log audio sample rate chain (AFTER all components initialized)
+    fprintf(stdout, "\n=== AUDIO SAMPLE RATE CHAIN ===\n");
+    fprintf(stdout, "AudioEngine::SAMPLE_RATE = %d\n", AudioEngine::SAMPLE_RATE);
+    fprintf(stdout, "AudioEngine::CHANNELS = %d\n", AudioEngine::CHANNELS);
+    AVStream* audioStream = m_streamMuxer->GetAudioStream();
+    fprintf(stdout, "Stream time_base.num = %d\n", audioStream ? audioStream->time_base.num : -1);
+    fprintf(stdout, "Stream time_base.den = %d (CRITICAL: should equal sample rate 48000)\n", audioStream ? audioStream->time_base.den : -1);
+    fprintf(stdout, "AudioEncoder sample_rate = %d\n", m_audioEncoder ? m_audioEncoder->GetSampleRate() : -1);
+    fprintf(stdout, "================================\n\n");
+    fflush(stdout);
+
     // Initialize AudioEngine with callback that encodes audio
     m_audioEngine->Initialize([this](const AudioPacket& p) {
         if (!m_audioEncoder || !m_streamMuxer || p.data.empty()) {

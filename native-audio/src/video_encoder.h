@@ -59,6 +59,9 @@ public:
     // Get FPS
     uint32_t GetFPS() const { return m_fps; }
 
+    // Get codec context (for extradata/SPS-PPS)
+    AVCodecContext* GetCodecContext() const { return m_codecContext; }
+
     // Cleanup
     void Cleanup();
 

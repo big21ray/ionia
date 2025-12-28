@@ -44,12 +44,16 @@ public:
     uint64_t GetVideoPacketsDropped() const { return m_videoPacketsDropped; }
     uint64_t GetAudioPacketsDropped() const { return m_audioPacketsDropped; }
 
+    AVStream* GetAudioStream() const { return m_audioStream; }
+
     bool CheckRtmpConnection();
     bool ReconnectRtmp();
 
 private:
     bool SetupVideoStream(VideoEncoder* encoder);
     bool SetupAudioStream(uint32_t sampleRate, uint16_t channels, uint32_t bitrate);
+    void SendAACSequenceHeader();
+    void SendAVCSequenceHeader();
     void Cleanup();
 
 private:
@@ -64,6 +68,7 @@ private:
     AVStream* m_videoStream = nullptr;
     AVStream* m_audioStream = nullptr;
     AVCodecContext* m_audioCodecContext = nullptr;
+    VideoEncoder* m_videoEncoder = nullptr;
 
     AVRational m_originalVideoTimeBase{0, 1};
 
@@ -72,9 +77,15 @@ private:
     int64_t m_lastAudioPTS = 0;
     int64_t m_videoFrameCount = 0;
     int64_t m_audioSampleCount = 0;
+    int64_t m_audioSamplesWritten;
     int64_t m_streamStartUs = -1;
 
     bool m_sentFirstVideoKeyframe = false;
+    bool m_sentAACSequenceHeader = false;
+    bool m_sentAVCSequenceHeader = false;
+
+    int64_t m_lastWrittenVideoDTS = -1;
+    int64_t m_lastWrittenAudioDTS = -1;
 
     uint64_t m_videoPacketCount = 0;
     uint64_t m_audioPacketCount = 0;

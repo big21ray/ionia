@@ -1,14 +1,20 @@
 #ifndef STREAM_BUFFER_H
 #define STREAM_BUFFER_H
 
-#include <queue>
+#include <deque>
 #include <mutex>
-#include <chrono>
 #include <cstdint>
+#include <algorithm>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
 }
+
+// Packet wrapper with DTS for latency calculation
+struct QueuedPacket {
+    AVPacket* pkt;
+    int64_t dts;
+};
 
 // Stream buffer for RTMP streaming with backpressure detection
 // Queues packets to handle network latency and buffer overflow
@@ -28,15 +34,12 @@ public:
     // Returns false if packet was dropped due to backpressure
     bool AddPacket(AVPacket* packet);
 
-    // Get next packet from queue (FIFO)
+    // Get next packet from queue (sorted by DTS)
     // Returns nullptr if queue is empty
     AVPacket* GetNextPacket();
 
-    // Get current latency in milliseconds (time since first packet)
-    int64_t GetCurrentLatencyMs() const;
-
     // Check if backpressure is detected
-    // True if buffer full OR latency too high
+    // True if buffer full OR DTS latency too high
     bool IsBackpressure() const;
 
     // Get current queue size
@@ -50,14 +53,17 @@ public:
     void Clear();
 
 private:
-    std::queue<AVPacket*> m_packets;
+    // DTS-based latency check
+    int64_t GetDtsLatencyMs() const;
+
+    std::deque<QueuedPacket> m_packets;
     mutable std::mutex m_mutex;
     size_t m_maxSize;
     int64_t m_maxLatencyMs;
-    std::chrono::high_resolution_clock::time_point m_firstPacketTime;
     
     uint64_t m_packetsDropped;
     uint64_t m_packetsAdded;
+    int64_t m_videoStreamIndex = -1;
 };
 
 #endif // STREAM_BUFFER_H

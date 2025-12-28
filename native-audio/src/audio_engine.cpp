@@ -103,14 +103,41 @@ void AudioEngine::FeedAudioData(const float* data, UINT32 numFrames, const char*
 
     std::lock_guard<std::mutex> lock(m_bufferMutex);
 
+    // ARTIFACT DEBUG: Track WASAPI buffer health
+    static int capture_callback_count = 0;
+    if (capture_callback_count < 20 || capture_callback_count % 100 == 0) {
+        fprintf(stderr, "[WASAPI] %s: %u frames (%.2f ms of audio)\n",
+            source, numFrames, (numFrames * 1000.0f) / SAMPLE_RATE);
+        fflush(stderr);
+    }
+    capture_callback_count++;
+
     if (strcmp(source, "desktop") == 0) {
         // Append desktop audio
         m_desktopBuffer.insert(m_desktopBuffer.end(), data, data + numSamples);
         m_desktopFramesAvailable += numFrames;
+        
+        // ARTIFACT DEBUG: Check for gap between captures
+        static UINT32 last_desktop_frames = 0;
+        if (last_desktop_frames > 0 && numFrames != last_desktop_frames) {
+            fprintf(stderr, "⚠️ WASAPI DESKTOP: Frame count changed %u → %u\n",
+                last_desktop_frames, numFrames);
+            fflush(stderr);
+        }
+        last_desktop_frames = numFrames;
     } else if (strcmp(source, "mic") == 0) {
         // Append mic audio
         m_micBuffer.insert(m_micBuffer.end(), data, data + numSamples);
         m_micFramesAvailable += numFrames;
+        
+        // ARTIFACT DEBUG: Check for gap between captures
+        static UINT32 last_mic_frames = 0;
+        if (last_mic_frames > 0 && numFrames != last_mic_frames) {
+            fprintf(stderr, "⚠️ WASAPI MIC: Frame count changed %u → %u\n",
+                last_mic_frames, numFrames);
+            fflush(stderr);
+        }
+        last_mic_frames = numFrames;
     }
 }
 
@@ -172,47 +199,70 @@ void AudioEngine::Tick() {
         return;
     }
 
-    // OBS-like clock master logic:
-    // Calculate how many frames we should have sent by now based on elapsed time
-    const UINT64 currentTimeMs = GetMonotonicTimeMs();
-    const UINT64 elapsedMs = currentTimeMs - m_startTimeMs;
-    const UINT64 expectedFrames = (elapsedMs * SAMPLE_RATE) / 1000;
-    const UINT64 framesToSend = expectedFrames - m_framesSent;
+    // ============ BLOCK-BASED AUDIO PULLING ============
+    // FIXED ARCHITECTURE: Pull exactly 1024 samples per tick (AAC frame size)
+    // This eliminates encoder buffering lag and PTS desync issues
+    // 
+    // Why this works:
+    // - AAC encoder always expects 1024-sample blocks
+    // - Previous: time-based pulling created irregular chunks (576, 768, 672...)
+    // - Encoder had to buffer internally, causing PTS desync
+    // - Result: dropped packets and audio artifacts
+    // 
+    // Now: Pull exactly when 1024 samples available
+    // Result: Encoder releases 1 packet per Tick, perfect PTS alignment
 
-    if (framesToSend <= 0) {
-        return;  // Not time to send yet
+    const UINT32 AAC_FRAME_SIZE = 1024;  // AAC frame size (non-negotiable)
+    
+    // Check if we have enough audio buffered for one AAC frame
+    UINT32 availableFrames = 0;
+    {
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+        availableFrames = m_desktopFramesAvailable + m_micFramesAvailable;
+        
+        // Log buffer state
+        static int tick_count = 0;
+        if (tick_count < 20 || tick_count % 50 == 0) {
+            fprintf(stderr, "[AudioEngine::Tick] BLOCK MODE: desktop=%u frames, mic=%u frames, total=%u (need %u for AAC)\n",
+                m_desktopFramesAvailable, m_micFramesAvailable, availableFrames, AAC_FRAME_SIZE);
+            fflush(stderr);
+        }
+        
+        // Warn if buffer is building (means WASAPI is faster than we're pulling)
+        if (availableFrames > AAC_FRAME_SIZE * 10 && tick_count % 20 == 0) {
+            fprintf(stderr, "⚠️ AUDIO BUFFER BUILDING: %u frames queued (WASAPI faster than pull rate)\n", availableFrames);
+            fflush(stderr);
+        }
+        
+        tick_count++;
     }
 
-    // Limit to reasonable chunks (max 100ms = 4800 frames at 48kHz)
-    const UINT32 maxFramesPerTick = (SAMPLE_RATE / 10);  // 100ms
-    const UINT32 outputFrames = static_cast<UINT32>((std::min)(static_cast<UINT64>(framesToSend), static_cast<UINT64>(maxFramesPerTick)));
-
-    if (outputFrames == 0) {
-        return;
+    // Only process if we have at least one full AAC frame
+    if (availableFrames < AAC_FRAME_SIZE) {
+        return;  // Wait for more audio to accumulate
     }
 
-    // OBS-like: Always send the required number of frames
-    // If no audio is available, send silence (OBS never blocks)
+    // Mix EXACTLY 1024 samples (AAC frame size)
+    // This ensures encoder gets perfectly aligned blocks
     std::vector<float> mixedAudio;
-    MixAudio(outputFrames, mixedAudio);
+    MixAudio(AAC_FRAME_SIZE, mixedAudio);
 
-    // Get current PTS in frames (OBS-like: explicit PTS control)
+    // Create packet with explicit frame count = 1024
+    // This ensures PTS is always at perfect 1024-sample boundaries
     int64_t ptsFrames = static_cast<int64_t>(m_framesSent);
 
-    // Create AudioPacket with explicit PTS using AudioPacketManager
-    // This ensures proper PTS control and synchronization
     AudioPacket packet = m_packetManager.CreatePacket(
         mixedAudio.data(),
-        outputFrames,
+        AAC_FRAME_SIZE,  // ← ALWAYS exactly 1024 samples
         ptsFrames
     );
 
-    // Call callback with AudioPacket (contains PTS for synchronization)
+    // Call callback with AudioPacket
     if (m_callback && packet.isValid()) {
         m_callback(packet);
     }
 
-    // Update frames sent counter
-    m_framesSent += outputFrames;
+    // Advance by exactly 1024 samples
+    m_framesSent += AAC_FRAME_SIZE;
 }
 

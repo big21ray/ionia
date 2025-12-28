@@ -236,8 +236,8 @@ std::vector<EncodedAudioPacket> AudioEncoder::Flush() {
                 while (avcodec_receive_packet(m_codecContext, avPacket) == 0) {
                     std::vector<uint8_t> packetData(avPacket->data, avPacket->data + avPacket->size);
                     
-                    // Create EncodedAudioPacket (BYTES ONLY, no timestamps)
-                    EncodedAudioPacket packet(packetData);
+                    // Create EncodedAudioPacket with sample count (AAC always outputs frameSize samples)
+                    EncodedAudioPacket packet(packetData, static_cast<int64_t>(frameSize));
                     packets.push_back(packet);
 
                     m_packetCount++;

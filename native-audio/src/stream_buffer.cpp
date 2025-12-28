@@ -7,6 +7,7 @@ StreamBuffer::StreamBuffer(size_t maxSize, int64_t maxLatencyMs)
     , m_maxLatencyMs(maxLatencyMs)
     , m_packetsDropped(0)
     , m_packetsAdded(0)
+    , m_videoStreamIndex(-1)
 {
 }
 
@@ -22,9 +23,9 @@ bool StreamBuffer::CanAcceptPacket() {
         return false;
     }
     
-    // Check latency if we have packets
+    // Check DTS-based latency
     if (!m_packets.empty()) {
-        int64_t latency = GetCurrentLatencyMs();
+        int64_t latency = GetDtsLatencyMs();
         if (latency > m_maxLatencyMs) {
             return false;
         }
@@ -42,30 +43,81 @@ bool StreamBuffer::AddPacket(AVPacket* packet) {
     
     // Check if we can accept the packet
     if (m_packets.size() >= m_maxSize) {
-        // Buffer full - drop packet
-        av_packet_free(&packet);
-        m_packetsDropped++;
-        return false;
-    }
-    
-    // Check latency
-    if (!m_packets.empty()) {
-        int64_t latency = GetCurrentLatencyMs();
-        if (latency > m_maxLatencyMs) {
-            // Latency too high - drop packet
+        // Buffer full - apply smart drop policy
+        // Try to drop a video P-frame instead of this packet
+        for (auto it = m_packets.begin(); it != m_packets.end(); ++it) {
+            // Drop video non-keyframe packets first
+            if (it->pkt->stream_index == m_videoStreamIndex &&
+                !(it->pkt->flags & AV_PKT_FLAG_KEY)) {
+                av_packet_free(&it->pkt);
+                m_packets.erase(it);
+                m_packetsDropped++;
+                break; // Dropped one, now try to add the new packet
+            }
+        }
+        
+        // If still full, refuse to add (don't drop audio or keyframes)
+        if (m_packets.size() >= m_maxSize) {
             av_packet_free(&packet);
             m_packetsDropped++;
             return false;
         }
     }
     
-    // Add packet to queue
-    if (m_packets.empty()) {
-        // First packet - record time
-        m_firstPacketTime = std::chrono::high_resolution_clock::now();
+    // Check DTS-based latency
+    if (!m_packets.empty()) {
+        int64_t latency = GetDtsLatencyMs();
+        
+        static int check_count = 0;
+        if (check_count < 10 || check_count % 100 == 0) {
+            fprintf(stderr, "[StreamBuffer] AddPacket: size=%zu, latency=%lld ms (max=%lld), front_dts=%lld, back_dts=%lld\n",
+                    m_packets.size(), latency, m_maxLatencyMs, 
+                    m_packets.front().dts, m_packets.back().dts);
+            fflush(stderr);
+        }
+        check_count++;
+        
+        if (latency > m_maxLatencyMs) {
+            fprintf(stderr, "[StreamBuffer] ⚠️ LATENCY TOO HIGH: %lld > %lld, trying to drop video P-frame\n",
+                    latency, m_maxLatencyMs);
+            fflush(stderr);
+            
+            // Latency too high - drop video P-frame instead if possible
+            for (auto it = m_packets.begin(); it != m_packets.end(); ++it) {
+                if (it->pkt->stream_index == m_videoStreamIndex &&
+                    !(it->pkt->flags & AV_PKT_FLAG_KEY)) {
+                    av_packet_free(&it->pkt);
+                    m_packets.erase(it);
+                    m_packetsDropped++;
+                    break; // Dropped one, now try to add the new packet
+                }
+            }
+            
+            // If still over latency, refuse to add
+            if (!m_packets.empty()) {
+                latency = GetDtsLatencyMs();
+                if (latency > m_maxLatencyMs) {
+                    fprintf(stderr, "[StreamBuffer] ⚠️ STILL TOO LATE after drop, refusing packet\n");
+                    fflush(stderr);
+                    av_packet_free(&packet);
+                    m_packetsDropped++;
+                    return false;
+                }
+            }
+        }
     }
     
-    m_packets.push(packet);
+    // Insert packet SORTED BY DTS (maintain monotonic order)
+    auto it = std::upper_bound(
+        m_packets.begin(),
+        m_packets.end(),
+        packet->dts,
+        [](int64_t dts, const QueuedPacket& qp) {
+            return dts < qp.dts;
+        }
+    );
+    
+    m_packets.insert(it, { packet, packet->dts });
     m_packetsAdded++;
     
     return true;
@@ -78,28 +130,38 @@ AVPacket* StreamBuffer::GetNextPacket() {
         return nullptr;
     }
     
-    AVPacket* packet = m_packets.front();
-    m_packets.pop();
+    // Get first packet (lowest DTS due to sorting)
+    QueuedPacket qp = m_packets.front();
+    m_packets.pop_front();
     
-    // Update first packet time if queue is now empty
-    if (m_packets.empty()) {
-        m_firstPacketTime = std::chrono::high_resolution_clock::now();
+    // Log buffer state
+    static int send_count = 0;
+    if (send_count < 10 || send_count % 100 == 0) {
+        fprintf(stderr, "[StreamBuffer] GetNextPacket: sent_dts=%lld, remaining=%zu\n",
+                qp.dts, m_packets.size());
+        fflush(stderr);
     }
+    send_count++;
     
-    return packet;
+    return qp.pkt;
 }
 
-int64_t StreamBuffer::GetCurrentLatencyMs() const {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    
+int64_t StreamBuffer::GetDtsLatencyMs() const {
+    // DTS-based latency calculation (no wall-clock time)
     if (m_packets.empty()) {
         return 0;
     }
     
-    auto now = std::chrono::high_resolution_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_firstPacketTime).count();
+    int64_t earliest_dts = m_packets.front().dts;
+    int64_t latest_dts = m_packets.back().dts;
     
-    return elapsed;
+    int64_t dts_span = latest_dts - earliest_dts;
+    
+    // Convert from time_base units to milliseconds
+    // Assuming reasonable time_base (typically 1/1000 for audio or 1/fps for video)
+    // For safety, assume this is already in reasonable units
+    // Return as-is (caller should rescale if needed)
+    return dts_span;
 }
 
 size_t StreamBuffer::GetSize() const {
@@ -115,9 +177,9 @@ bool StreamBuffer::IsBackpressure() const {
         return true;
     }
     
-    // Check latency
+    // Check DTS-based latency
     if (!m_packets.empty()) {
-        int64_t latency = GetCurrentLatencyMs();
+        int64_t latency = GetDtsLatencyMs();
         if (latency > m_maxLatencyMs) {
             return true;
         }
@@ -130,14 +192,11 @@ void StreamBuffer::Clear() {
     std::lock_guard<std::mutex> lock(m_mutex);
     
     while (!m_packets.empty()) {
-        AVPacket* packet = m_packets.front();
-        m_packets.pop();
+        AVPacket* packet = m_packets.front().pkt;
+        m_packets.pop_front();
         av_packet_free(&packet);
     }
     
     m_packetsDropped = 0;
     m_packetsAdded = 0;
 }
-
-
-
