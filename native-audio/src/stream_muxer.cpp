@@ -6,6 +6,7 @@
 
 extern "C" {
 #include <libavutil/avutil.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/time.h>
 }
 
@@ -13,6 +14,14 @@ extern "C" {
 #include <cstdio>
 
 /* ============================== */
+
+static inline int64_t RescaleRounded(int64_t value, AVRational src, AVRational dst) {
+    return av_rescale_q_rnd(
+        value,
+        src,
+        dst,
+        (AVRounding)(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
+}
 
 static int AacSampleRateIndex(int sampleRate) {
     // MPEG-4 Audio samplingFrequencyIndex
@@ -148,6 +157,10 @@ bool StreamMuxer::Initialize(const std::string& rtmpUrl,
     // (AAC AudioSpecificConfig, H264 avcC) and then write raw AAC/H264 packets.
     // Manually injecting FLV-tag payloads via av_write_frame() corrupts the stream.
 
+    // Reset pacing state (used by buffered network send)
+    m_streamStartUs = -1;
+    m_firstPacketDtsUs = -1;
+
     m_initialized = true;
     m_isConnected = true;
     return true;
@@ -255,25 +268,20 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex) {
         return false;
     }
 
-    // Compute PTS/DTS in a logical millisecond clock, then rescale to the stream's
-    // actual time_base (which may be adjusted by the muxer at header-write time).
-    uint32_t fps = m_videoEncoder ? m_videoEncoder->GetFPS() : 30;
-    int64_t pts_ms = av_rescale_q(
-        frameIndex,
-        AVRational{1, (int)fps},
-        AVRational{1, 1000}
-    );
+    // Video clock: frameIndex in {1/fps}. Convert directly into the muxer's chosen
+    // stream time_base using rounded rescaling to avoid systematic drift.
+    const uint32_t fps = m_videoEncoder ? m_videoEncoder->GetFPS() : 30;
+    const AVRational vSrcTb{1, (int)fps};
+    const AVRational vDstTb = m_videoStream->time_base;
 
-    pkt->pts = pts_ms;
-    pkt->dts = pts_ms;
-    pkt->duration = av_rescale_q(
-        1,
-        AVRational{1, (int)fps},
-        AVRational{1, 1000}
-    );
+    const int64_t pts = RescaleRounded(frameIndex, vSrcTb, vDstTb);
+    int64_t nextPts = RescaleRounded(frameIndex + 1, vSrcTb, vDstTb);
+    if (nextPts <= pts) nextPts = pts + 1;
+
+    pkt->pts = pts;
+    pkt->dts = pts;  // NOTE: only correct if encoder outputs no B-frames
+    pkt->duration = nextPts - pts;
     pkt->stream_index = m_videoStream->index;
-
-    av_packet_rescale_ts(pkt, AVRational{1, 1000}, m_videoStream->time_base);
 
     if (pktIn->isKeyframe) {
         pkt->flags |= AV_PKT_FLAG_KEY;
@@ -322,18 +330,27 @@ bool StreamMuxer::WriteAudioPacket(const EncodedAudioPacket& p) {
     av_new_packet(pkt, p.data.size());
     memcpy(pkt->data, p.data.data(), p.data.size());
 
-    // Sample-accurate timestamps in units of 1/sample_rate, then rescale to the
-    // stream's actual time_base (the FLV muxer often uses 1/1000).
-    const AVRational audioSrcTb{1, (int)m_audioCodecContext->sample_rate};
-    pkt->pts = m_audioSamplesWritten;
-    pkt->dts = m_audioSamplesWritten;
-    pkt->duration = p.numSamples;
+    // Audio clock: cumulative samples in {1/sample_rate}. Convert into the muxer's chosen
+    // stream time_base using rounded rescaling, and derive duration from nextPts-pts
+    // to avoid drift (which can present as "accelerated" playback).
+    const int sr = (m_audioCodecContext && m_audioCodecContext->sample_rate) ? m_audioCodecContext->sample_rate : 48000;
+    const AVRational audioSrcTb{1, sr};
+    const AVRational audioDstTb = m_audioStream->time_base;
+
+    const int64_t curSamples = m_audioSamplesWritten;
+    const int64_t nextSamples = curSamples + p.numSamples;
+
+    const int64_t pts = RescaleRounded(curSamples, audioSrcTb, audioDstTb);
+    int64_t nextPts = RescaleRounded(nextSamples, audioSrcTb, audioDstTb);
+    if (nextPts <= pts) nextPts = pts + 1;
+
+    pkt->pts = pts;
+    pkt->dts = pts;
+    pkt->duration = nextPts - pts;
     pkt->stream_index = m_audioStream->index;
 
     // Advance sample counter
-    m_audioSamplesWritten += p.numSamples;
-
-    av_packet_rescale_ts(pkt, audioSrcTb, m_audioStream->time_base);
+    m_audioSamplesWritten = nextSamples;
 
     // MONOTONIC DTS CHECK
     if (pkt->dts <= m_lastWrittenAudioDTS) {
@@ -457,6 +474,34 @@ bool StreamMuxer::SendNextBufferedPacket() {
 
     AVPacket* pkt = m_buffer->GetNextPacket();
     if (!pkt) return false;
+
+    // ================== REAL-TIME PACING ==================
+    // The network thread can drain the buffer faster than real time.
+    // Sleep until this packet's DTS is due (relative to the first packet sent).
+    // This prevents "accelerated" playback where timeline advances faster than wall time.
+    if (m_formatContext && pkt->stream_index >= 0 && pkt->stream_index < (int)m_formatContext->nb_streams) {
+        const AVRational tb = m_formatContext->streams[pkt->stream_index]->time_base;
+        const int64_t pktDtsUs = av_rescale_q(pkt->dts, tb, AVRational{1, 1000000});
+
+        if (m_streamStartUs < 0 || m_firstPacketDtsUs < 0) {
+            m_streamStartUs = av_gettime_relative();
+            m_firstPacketDtsUs = pktDtsUs;
+        } else {
+            const int64_t nowUs = av_gettime_relative();
+            const int64_t elapsedUs = nowUs - m_streamStartUs;
+            const int64_t targetUs = pktDtsUs - m_firstPacketDtsUs;
+
+            // Small tolerance to avoid micro-sleeps (and give the muxer a tiny lead).
+            const int64_t toleranceUs = 2000;
+            if (targetUs > elapsedUs + toleranceUs) {
+                int64_t sleepUs = targetUs - elapsedUs;
+                if (sleepUs > 250000) sleepUs = 250000; // cap at 250ms per packet
+                if (sleepUs > 0) {
+                    av_usleep((unsigned int)sleepUs);
+                }
+            }
+        }
+    }
 
     int ret = av_interleaved_write_frame(m_formatContext, pkt);
     av_packet_free(&pkt);

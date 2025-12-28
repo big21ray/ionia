@@ -891,6 +891,17 @@ void VideoAudioStreamerAddon::AudioTickThread() {
         }
 
         int tickCount = 0;
+
+        // Drive AAC frame cadence from a monotonic clock.
+        // On Windows, sleep granularity can be ~15.6ms unless timer resolution is raised,
+        // so a fixed sleep_for(21333us) can under-produce audio frames and cause
+        // perceived "accelerated" playback (time-compression / skipped audio).
+        using Clock = std::chrono::steady_clock;
+        const int64_t sampleRate = static_cast<int64_t>(AudioEngine::SAMPLE_RATE);
+        const int64_t aacFrameSize = 1024; // AAC-LC frame size
+        const int64_t frameDurationUs = (aacFrameSize * 1000000LL + sampleRate / 2) / sampleRate; // rounded
+
+        auto nextTickTime = Clock::now();
         while (!m_shouldStop) {
             tickCount++;
             try {
@@ -931,35 +942,38 @@ void VideoAudioStreamerAddon::AudioTickThread() {
                     break;
                 }
                 
-                fprintf(stderr, "[AudioTickThread] Loop %d: Calling Tick()\n", tickCount);
-                fflush(stderr);
-                try {
-                    m_audioEngine->Tick();
-                    fprintf(stderr, "[AudioTickThread] Loop %d: Tick() completed successfully\n", tickCount);
-                    fflush(stderr);
-                } catch (const std::exception& e) {
-                    fprintf(stderr, "[AudioTickThread] Loop %d: TICK EXCEPTION: %s\n", tickCount, e.what());
-                    fflush(stderr);
-                    break;
-                } catch (...) {
-                    fprintf(stderr, "[AudioTickThread] Loop %d: TICK UNKNOWN EXCEPTION\n", tickCount);
-                    fflush(stderr);
-                    break;
-                }
-                
                 if (tickCount % 50 == 0) {
                     fprintf(stderr, "[AudioTickThread] Loop %d: Audio ticks=%d, packets=%llu\n", tickCount, tickCount, m_audioPackets.load());
                     fflush(stderr);
                 }
                 
-                // CRITICAL: Sleep must match AAC frame cadence, not arbitrary 10ms
-                // 1024 samples @ 48 kHz = 21.333... ms
-                // This ensures AudioEngine::Tick() is called at exactly the right rate
-                fprintf(stderr, "[AudioTickThread] Loop %d: About to sleep 21.333ms (AAC frame cadence)\n", tickCount);
-                fflush(stderr);
-                std::this_thread::sleep_for(std::chrono::microseconds(21333));
-                fprintf(stderr, "[AudioTickThread] Loop %d: Woke from sleep\n", tickCount);
-                fflush(stderr);
+                // Schedule next tick based on monotonic time (better than fixed sleeps).
+                // If we're behind, catch up by emitting multiple frames (AudioEngine will
+                // pad with silence as needed), rather than compressing time.
+                const auto now = Clock::now();
+                if (now < nextTickTime) {
+                    std::this_thread::sleep_until(nextTickTime);
+                }
+
+                // Catch-up loop (caps burst work to keep CPU sane)
+                int catchUps = 0;
+                while (Clock::now() >= nextTickTime && catchUps < 5 && !m_shouldStop) {
+                    try {
+                        m_audioEngine->Tick();
+                    } catch (const std::exception& e) {
+                        fprintf(stderr, "[AudioTickThread] Loop %d: TICK EXCEPTION: %s\n", tickCount, e.what());
+                        fflush(stderr);
+                        m_shouldStop = true;
+                        break;
+                    } catch (...) {
+                        fprintf(stderr, "[AudioTickThread] Loop %d: TICK UNKNOWN EXCEPTION\n", tickCount);
+                        fflush(stderr);
+                        m_shouldStop = true;
+                        break;
+                    }
+                    nextTickTime += std::chrono::microseconds(frameDurationUs);
+                    catchUps++;
+                }
                 
                 fprintf(stderr, "[AudioTickThread] Loop %d: END\n", tickCount);
                 fflush(stderr);

@@ -78,7 +78,11 @@ private:
     int64_t m_videoFrameCount = 0;
     int64_t m_audioSampleCount = 0;
     int64_t m_audioSamplesWritten;
+    // Real-time pacing state for buffered network send.
+    // m_streamStartUs: wall clock (us) when first packet was sent.
+    // m_firstPacketDtsUs: timeline dts (us) of first packet sent.
     int64_t m_streamStartUs = -1;
+    int64_t m_firstPacketDtsUs = -1;
 
     bool m_sentFirstVideoKeyframe = false;
     bool m_sentAACSequenceHeader = false;
