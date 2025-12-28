@@ -853,14 +853,11 @@ void AudioCapture::AdaptChannels(
             outFloat[frame * 2 + 1] = mono;  // Right
         }
     } else if (inChannels > TARGET_CHANNELS) {
-        // Multi-channel → Stereo: use front-left (ch0) and front-right (ch1)
+        // Multi-channel → Stereo: use ONLY front-left (ch0) and front-right (ch1)
+        // This works for 5.1, 7.1 surround formats where FL/FR are first two channels
         for (UINT32 frame = 0; frame < outFrames; frame++) {
-            outFloat[frame * 2 + 0] = inFloat[frame * inChannels + 0];  // Left
-            if (inChannels > 1) {
-                outFloat[frame * 2 + 1] = inFloat[frame * inChannels + 1];  // Right
-            } else {
-                outFloat[frame * 2 + 1] = inFloat[frame * inChannels + 0];  // Duplicate if only one channel
-            }
+            outFloat[frame * 2 + 0] = inFloat[frame * inChannels + 0];  // Front Left
+            outFloat[frame * 2 + 1] = inFloat[frame * inChannels + 1];  // Front Right
         }
     } else {
         // Should not happen (inChannels < 2 but != 1)

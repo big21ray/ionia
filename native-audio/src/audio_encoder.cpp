@@ -123,72 +123,63 @@ std::vector<EncodedAudioPacket> AudioEncoder::EncodeFrames(const float* pcmData,
         return packets;
     }
 
-    // Accumulate frames instead of padding with silence
-    // Add new frames to accumulation buffer
-    const UINT32 numSamples = numFrames * m_channels;
+    // CRITICAL: AudioEngine guarantees exactly 1024 samples per call
+    // Do NOT accumulate - encode immediately to maintain tight timing
+    // Accumulation causes jitter and delays that lead to audio crackles
     
-    // Append new frames to accumulation buffer
-    m_accumulatedFrames.insert(m_accumulatedFrames.end(), pcmData, pcmData + numSamples);
+    const UINT32 frameSize = m_codecContext->frame_size;  // Should be 1024 for AAC
+    
+    // Verify we got exactly the expected frame size
+    if (numFrames != frameSize) {
+        fprintf(stderr, "[AudioEncoder] WARNING: Got %u frames, expected %u\n", numFrames, frameSize);
+        fflush(stderr);
+    }
 
-    // Convert interleaved float32 to planar float32 (AAC requirement)
-    const UINT32 frameSize = m_codecContext->frame_size;
+    // Make frame writable
+    int ret = av_frame_make_writable(m_frame);
+    if (ret < 0) {
+        return packets;
+    }
 
-    // Process complete frames (frames that are multiples of frameSize)
-    // Recalculate accumulatedFrames in each iteration since we modify m_accumulatedFrames
-    while (static_cast<UINT32>(m_accumulatedFrames.size() / m_channels) >= frameSize) {
-        UINT32 accumulatedFrames = static_cast<UINT32>(m_accumulatedFrames.size() / m_channels);
-        // Make frame writable
-        int ret = av_frame_make_writable(m_frame);
-        if (ret < 0) {
-            break;
-        }
+    // Convert interleaved float32 to planar float32
+    float* leftChannel = (float*)m_frame->data[0];
+    float* rightChannel = (float*)m_frame->data[1];
 
-        // Convert interleaved float32 to planar float32
-        float* leftChannel = (float*)m_frame->data[0];
-        float* rightChannel = (float*)m_frame->data[1];
+    // Copy data directly (no accumulation)
+    for (UINT32 i = 0; i < numFrames; i++) {
+        UINT32 srcIdx = i * m_channels;
+        leftChannel[i] = pcmData[srcIdx];
+        rightChannel[i] = pcmData[srcIdx + 1];
+    }
 
-        // Extract frameSize frames from accumulation buffer
-        for (UINT32 i = 0; i < frameSize; i++) {
-            UINT32 srcIdx = i * m_channels;
-            leftChannel[i] = m_accumulatedFrames[srcIdx];
-            rightChannel[i] = m_accumulatedFrames[srcIdx + 1];
-        }
+    // Set frame PTS
+    static int64_t internalFrameCounter = 0;
+    m_frame->pts = internalFrameCounter++;
 
-        // Set frame PTS (encoder needs it for internal buffering, but we use frame counter)
-        // The muxer will assign the real PTS based on sample count
-        static int64_t internalFrameCounter = 0;
-        m_frame->pts = internalFrameCounter++;
+    // Send frame to encoder
+    ret = avcodec_send_frame(m_codecContext, m_frame);
+    if (ret < 0) {
+        fprintf(stderr, "[AudioEncoder] avcodec_send_frame failed: %d\n", ret);
+        fflush(stderr);
+        return packets;
+    }
 
-        // Send frame to encoder
-        ret = avcodec_send_frame(m_codecContext, m_frame);
-        if (ret < 0) {
-            // Log error but continue (don't break - try to recover)
-            break;
-        }
+    // Receive encoded packets
+    AVPacket* avPacket = av_packet_alloc();
+    while (avcodec_receive_packet(m_codecContext, avPacket) == 0) {
+        // Create EncodedAudioPacket (BYTES + SAMPLE COUNT)
+        std::vector<uint8_t> packetData(avPacket->data, avPacket->data + avPacket->size);
+        
+        EncodedAudioPacket packet(packetData, static_cast<int64_t>(frameSize));
+        packets.push_back(packet);
 
-        // Receive encoded packets
-        AVPacket* avPacket = av_packet_alloc();
-        while (avcodec_receive_packet(m_codecContext, avPacket) == 0) {
-            // Create EncodedAudioPacket (BYTES + SAMPLE COUNT)
-            // numSamples is CRITICAL for StreamMuxer to compute correct PTS
-            // AAC encoder always outputs exactly frameSize samples per packet
-            std::vector<uint8_t> packetData(avPacket->data, avPacket->data + avPacket->size);
-            
-            EncodedAudioPacket packet(packetData, static_cast<int64_t>(frameSize));
-            packets.push_back(packet);
+        m_packetCount++;
+        m_totalBytes += avPacket->size;
 
-            m_packetCount++;
-            m_totalBytes += avPacket->size;
-
-            av_packet_unref(avPacket);
-        }
-        if (avPacket) {
-            av_packet_free(&avPacket);
-        }
-
-        // Remove processed frames from accumulation buffer
-        const UINT32 samplesToRemove = frameSize * m_channels;
-        m_accumulatedFrames.erase(m_accumulatedFrames.begin(), m_accumulatedFrames.begin() + samplesToRemove);
+        av_packet_unref(avPacket);
+    }
+    if (avPacket) {
+        av_packet_free(&avPacket);
     }
 
     return packets;
@@ -201,77 +192,20 @@ std::vector<EncodedAudioPacket> AudioEncoder::Flush() {
         return packets;
     }
 
-    // FIX #1: OBS-like behavior - Only encode if we have EXACTLY frameSize frames
-    // Never pad with silence, even on flush
-    // If we don't have enough frames, we simply don't encode them (they're lost)
-    const UINT32 frameSize = m_codecContext->frame_size;
-    const UINT32 accumulatedFrames = static_cast<UINT32>(m_accumulatedFrames.size() / m_channels);
+    // Since EncodeFrames() encodes immediately without accumulation,
+    // this Flush() just sends NULL to the encoder to get any remaining buffered packets
     
-    // Only encode if we have exactly frameSize frames (OBS rule)
-    if (accumulatedFrames >= frameSize) {
-        // Make frame writable
-        int ret = av_frame_make_writable(m_frame);
-        if (ret >= 0) {
-            // Convert interleaved float32 to planar float32
-            float* leftChannel = (float*)m_frame->data[0];
-            float* rightChannel = (float*)m_frame->data[1];
-
-            // Copy frameSize frames from accumulation buffer
-            for (UINT32 i = 0; i < frameSize; i++) {
-                UINT32 srcIdx = i * m_channels;
-                leftChannel[i] = m_accumulatedFrames[srcIdx];
-                rightChannel[i] = m_accumulatedFrames[srcIdx + 1];
-            }
-
-            // Set frame PTS (encoder needs it for internal buffering)
-            // The muxer will assign the real PTS
-            static int64_t internalFrameCounter = 0;
-            m_frame->pts = internalFrameCounter++;
-
-            // Send frame to encoder
-            ret = avcodec_send_frame(m_codecContext, m_frame);
-            if (ret >= 0) {
-                // Receive encoded packets
-                AVPacket* avPacket = av_packet_alloc();
-                while (avcodec_receive_packet(m_codecContext, avPacket) == 0) {
-                    std::vector<uint8_t> packetData(avPacket->data, avPacket->data + avPacket->size);
-                    
-                    // Create EncodedAudioPacket with sample count (AAC always outputs frameSize samples)
-                    EncodedAudioPacket packet(packetData, static_cast<int64_t>(frameSize));
-                    packets.push_back(packet);
-
-                    m_packetCount++;
-                    m_totalBytes += avPacket->size;
-
-                    av_packet_unref(avPacket);
-                }
-                if (avPacket) {
-                    av_packet_free(&avPacket);
-                }
-            }
-            
-            // Remove processed frames from accumulation buffer
-            const UINT32 samplesToRemove = frameSize * m_channels;
-            m_accumulatedFrames.erase(m_accumulatedFrames.begin(), m_accumulatedFrames.begin() + samplesToRemove);
-        }
-    }
-    
-    // OBS-like: Clear any remaining incomplete frames (don't encode them, don't pad with silence)
-    // These frames are simply lost (acceptable for real-time encoding)
-    m_accumulatedFrames.clear();
-
-    // Send NULL frame to flush encoder (get any remaining packets)
+    // Send NULL frame to flush any remaining packets in FFmpeg's internal buffer
     int ret = avcodec_send_frame(m_codecContext, nullptr);
     if (ret < 0) {
         return packets;
     }
 
-    // Receive remaining encoded packets
+    // Receive any remaining encoded packets
     AVPacket* avPacket = av_packet_alloc();
     while (avcodec_receive_packet(m_codecContext, avPacket) == 0) {
         std::vector<uint8_t> packetData(avPacket->data, avPacket->data + avPacket->size);
         
-        // Create EncodedAudioPacket (BYTES ONLY, no timestamps)
         EncodedAudioPacket packet(packetData);
         packets.push_back(packet);
 
@@ -283,6 +217,9 @@ std::vector<EncodedAudioPacket> AudioEncoder::Flush() {
     if (avPacket) {
         av_packet_free(&avPacket);
     }
+
+    // Clear any leftover accumulated frames (should be empty anyway)
+    m_accumulatedFrames.clear();
 
     return packets;
 }

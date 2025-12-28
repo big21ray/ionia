@@ -5,6 +5,7 @@
 
 
 extern "C" {
+#include <libavutil/avutil.h>
 #include <libavutil/time.h>
 }
 
@@ -12,6 +13,53 @@ extern "C" {
 #include <cstdio>
 
 /* ============================== */
+
+static int AacSampleRateIndex(int sampleRate) {
+    // MPEG-4 Audio samplingFrequencyIndex
+    switch (sampleRate) {
+        case 96000: return 0;
+        case 88200: return 1;
+        case 64000: return 2;
+        case 48000: return 3;
+        case 44100: return 4;
+        case 32000: return 5;
+        case 24000: return 6;
+        case 22050: return 7;
+        case 16000: return 8;
+        case 12000: return 9;
+        case 11025: return 10;
+        case 8000:  return 11;
+        case 7350:  return 12;
+        default:    return -1;
+    }
+}
+
+static bool SetAacAudioSpecificConfigExtradata(AVStream* stream, int sampleRate, int channels) {
+    if (!stream || !stream->codecpar) return false;
+    const int srIndex = AacSampleRateIndex(sampleRate);
+    if (srIndex < 0) return false;
+
+    // AudioSpecificConfig for AAC-LC (objectType=2), 2 bytes for common cases.
+    // See ISO/IEC 14496-3.
+    const uint8_t objectType = 2; // AAC LC
+    const uint8_t channelConfig = (channels >= 0 && channels <= 7) ? (uint8_t)channels : 2;
+
+    uint8_t asc[2];
+    asc[0] = (uint8_t)((objectType << 3) | ((srIndex & 0x0F) >> 1));
+    asc[1] = (uint8_t)(((srIndex & 0x01) << 7) | ((channelConfig & 0x0F) << 3));
+
+    if (stream->codecpar->extradata) {
+        av_freep(&stream->codecpar->extradata);
+        stream->codecpar->extradata_size = 0;
+    }
+
+    stream->codecpar->extradata = (uint8_t*)av_malloc(sizeof(asc) + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!stream->codecpar->extradata) return false;
+    memcpy(stream->codecpar->extradata, asc, sizeof(asc));
+    memset(stream->codecpar->extradata + sizeof(asc), 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    stream->codecpar->extradata_size = (int)sizeof(asc);
+    return true;
+}
 
 StreamMuxer::StreamMuxer()
     : m_initialized(false),
@@ -77,21 +125,28 @@ bool StreamMuxer::Initialize(const std::string& rtmpUrl,
     if (avformat_write_header(m_formatContext, nullptr) < 0)
         return false;
 
-    // CRITICAL: Keep audio time_base as {1, 1000} to match video
-    // avformat_write_header might change it, so force it back
-    fprintf(stderr, "[Initialize] Before fix: audio time_base = {%d, %d}\n", 
-            m_audioStream->time_base.num, m_audioStream->time_base.den);
-    fflush(stderr);
-    
-    m_audioStream->time_base = {1, 1000};  // MUST be {1, 1000} to match video!
-    
-    fprintf(stderr, "[Initialize] After fix: audio time_base = {%d, %d}\n", 
-            m_audioStream->time_base.num, m_audioStream->time_base.den);
-    fflush(stderr);
+    // Important: the muxer may adjust stream time_bases during header writing.
+    // Log the final values so we can correlate with packet timestamp behavior.
+    if (m_videoStream && m_audioStream) {
+        fprintf(stderr,
+                "[StreamMuxer] Post-header time_base: video={%d/%d} audio={%d/%d}\n",
+                m_videoStream->time_base.num, m_videoStream->time_base.den,
+                m_audioStream->time_base.num, m_audioStream->time_base.den);
+        fflush(stderr);
+    }
 
-    // Send sequence headers BEFORE any audio/video frames
-    SendAACSequenceHeader();
-    SendAVCSequenceHeader();
+    // Provide time_base info to the StreamBuffer so it can compute ordering/latency in milliseconds
+    // while leaving each packet's timestamps in the stream's native time_base.
+    if (m_buffer && m_videoStream && m_audioStream) {
+        m_buffer->SetStreamInfo(
+            m_videoStream->index, m_videoStream->time_base,
+            m_audioStream->index, m_audioStream->time_base);
+    }
+
+    // Note: do NOT manually write FLV AAC/AVC "sequence header" packets here.
+    // When using libavformat's FLV muxer, you must provide codec extradata
+    // (AAC AudioSpecificConfig, H264 avcC) and then write raw AAC/H264 packets.
+    // Manually injecting FLV-tag payloads via av_write_frame() corrupts the stream.
 
     m_initialized = true;
     m_isConnected = true;
@@ -166,12 +221,17 @@ bool StreamMuxer::SetupAudioStream(uint32_t rate, uint16_t ch, uint32_t br) {
     avcodec_parameters_from_context(
         m_audioStream->codecpar, m_audioCodecContext);
 
-    // CRITICAL FIX: Both streams MUST use same time_base for av_write_frame!
-    // Audio in milliseconds {1, 1000} to match video
-    m_audioStream->time_base = {1, 1000};  // Milliseconds (MUST match video!)
-    
-    fprintf(stderr, "[SetupAudioStream] Audio time_base FIXED to {1, 1000} to match video\n");
-    fflush(stderr);
+    // Provide AAC AudioSpecificConfig as codec extradata so the FLV muxer can emit
+    // the proper AAC sequence header (AudioSpecificConfig) automatically.
+    if (!SetAacAudioSpecificConfigExtradata(m_audioStream, (int)rate, (int)ch)) {
+        fprintf(stderr, "[SetupAudioStream] Failed to set AAC AudioSpecificConfig extradata\n");
+        fflush(stderr);
+        return false;
+    }
+
+    // Keep audio timestamps in sample units (1/sample_rate). This avoids millisecond rounding jitter.
+    // FFmpeg will rescale as needed for the FLV/RTMP muxer.
+    m_audioStream->time_base = m_audioCodecContext->time_base;
     
     return true;
 }
@@ -195,8 +255,8 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex) {
         return false;
     }
 
-    // RESCALE: Convert frame index to milliseconds (OBS style)
-    // OBS uses millisecond timestamps for FLV streaming
+    // Compute PTS/DTS in a logical millisecond clock, then rescale to the stream's
+    // actual time_base (which may be adjusted by the muxer at header-write time).
     uint32_t fps = m_videoEncoder ? m_videoEncoder->GetFPS() : 30;
     int64_t pts_ms = av_rescale_q(
         frameIndex,
@@ -213,6 +273,8 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex) {
     );
     pkt->stream_index = m_videoStream->index;
 
+    av_packet_rescale_ts(pkt, AVRational{1, 1000}, m_videoStream->time_base);
+
     if (pktIn->isKeyframe) {
         pkt->flags |= AV_PKT_FLAG_KEY;
         m_sentFirstVideoKeyframe = true;
@@ -225,8 +287,23 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex) {
     }
     m_lastWrittenVideoDTS = pkt->dts;
 
-    if (m_buffer) m_buffer->AddPacket(pkt);
-    else av_write_frame(m_formatContext, pkt);
+    if (m_buffer) {
+        if (!m_buffer->AddPacket(pkt)) {
+            m_videoPacketsDropped++;
+            return false;
+        }
+    } else {
+        int ret = av_interleaved_write_frame(m_formatContext, pkt);
+        av_packet_free(&pkt);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            fprintf(stderr, "[StreamMuxer] WriteVideoPacket av_interleaved_write_frame failed: %s\n", errbuf);
+            fflush(stderr);
+            m_isConnected = false;
+            return false;
+        }
+    }
 
     m_videoPacketCount++;
     m_totalBytes += pktIn->data.size();
@@ -234,82 +311,29 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex) {
 }
 
 bool StreamMuxer::WriteAudioPacket(const EncodedAudioPacket& p) {
-    if (!m_initialized || !m_isConnected || !m_sentFirstVideoKeyframe)
+    if (!m_initialized || !m_isConnected)
         return false;
+    
+    // Note: We DON'T require m_sentFirstVideoKeyframe for audio
+    // Audio can be buffered until video starts
+    // This prevents audio drop when video is still initializing
 
     AVPacket* pkt = av_packet_alloc();
     av_new_packet(pkt, p.data.size());
     memcpy(pkt->data, p.data.data(), p.data.size());
 
-    // CRITICAL FIX: Convert audio samples to milliseconds (same time_base as video)
-    // Both streams use {1, 1000}, so PTS/duration must be in milliseconds
-    int64_t audio_pts_ms = av_rescale_q(
-        m_audioSamplesWritten,
-        AVRational{1, m_audioCodecContext->sample_rate},
-        AVRational{1, 1000}
-    );
-
-    pkt->pts = audio_pts_ms;
-    pkt->dts = audio_pts_ms;
-    pkt->duration = av_rescale_q(
-        p.numSamples,
-        AVRational{1, m_audioCodecContext->sample_rate},
-        AVRational{1, 1000}
-    );
+    // Sample-accurate timestamps in units of 1/sample_rate, then rescale to the
+    // stream's actual time_base (the FLV muxer often uses 1/1000).
+    const AVRational audioSrcTb{1, (int)m_audioCodecContext->sample_rate};
+    pkt->pts = m_audioSamplesWritten;
+    pkt->dts = m_audioSamplesWritten;
+    pkt->duration = p.numSamples;
     pkt->stream_index = m_audioStream->index;
 
-    // COMPREHENSIVE AUDIO DIAGNOSTICS
-    static int64_t last_audio_pts = -1;
-    static int64_t last_numSamples = -1;
-    static int audio_pkt_count = 0;
-    static int burst_count = 0;
-    static int gap_count = 0;
-    
-    if (last_audio_pts != -1) {
-        int64_t delta = audio_pts_ms - last_audio_pts;
-        int64_t expected_delta_ms = (p.numSamples * 1000) / m_audioCodecContext->sample_rate;
-        
-        fprintf(stderr, "Audio delta ms = %lld (expected ~21)\n", delta);
-        fflush(stderr);
-        
-        // ARTIFACT DETECTION: Check for irregular patterns
-        if (delta < 19) {
-            gap_count++;
-            fprintf(stderr,
-                "❌ AUDIO GAP DETECTED [%d total]: delta=%lld ms (EARLY PACKET, gap_count=%d)\n",
-                gap_count, delta, gap_count);
-            fflush(stderr);
-        } else if (delta > 24) {
-            burst_count++;
-            fprintf(stderr,
-                "❌ AUDIO BURST DETECTED [%d total]: delta=%lld ms (LATE PACKET, burst_count=%d)\n",
-                burst_count, delta, burst_count);
-            fflush(stderr);
-        }
-        
-        // Check for sample count consistency
-        if (last_numSamples != -1 && p.numSamples != last_numSamples && p.numSamples != 1024) {
-            fprintf(stderr,
-                "⚠️ IRREGULAR SAMPLE COUNT: last=%lld, current=%lld (expected 1024)\n",
-                last_numSamples, p.numSamples);
-            fflush(stderr);
-        }
-    }
-    last_audio_pts = audio_pts_ms;
-    last_numSamples = p.numSamples;
-
-    // Log every packet for full audit trail
-    static int log_interval = 0;
-    if (log_interval < 20 || log_interval % 50 == 0) {
-        fprintf(stderr,
-            "[Audio AUDIT] Pkt %d: size=%zu bytes, numSamples=%lld, pts=%lld ms, duration=%lld ms\n",
-            audio_pkt_count, p.data.size(), p.numSamples, pkt->pts, pkt->duration);
-        fflush(stderr);
-    }
-    log_interval++;
-    audio_pkt_count++;
-
+    // Advance sample counter
     m_audioSamplesWritten += p.numSamples;
+
+    av_packet_rescale_ts(pkt, audioSrcTb, m_audioStream->time_base);
 
     // MONOTONIC DTS CHECK
     if (pkt->dts <= m_lastWrittenAudioDTS) {
@@ -322,8 +346,23 @@ bool StreamMuxer::WriteAudioPacket(const EncodedAudioPacket& p) {
     }
     m_lastWrittenAudioDTS = pkt->dts;
 
-    if (m_buffer) m_buffer->AddPacket(pkt);
-    else av_write_frame(m_formatContext, pkt);
+    if (m_buffer) {
+        if (!m_buffer->AddPacket(pkt)) {
+            m_audioPacketsDropped++;
+            return false;
+        }
+    } else {
+        int ret = av_interleaved_write_frame(m_formatContext, pkt);
+        av_packet_free(&pkt);
+        if (ret < 0) {
+            char errbuf[256];
+            av_strerror(ret, errbuf, sizeof(errbuf));
+            fprintf(stderr, "[StreamMuxer] WriteAudioPacket av_interleaved_write_frame failed: %s\n", errbuf);
+            fflush(stderr);
+            m_isConnected = false;
+            return false;
+        }
+    }
 
     m_audioPacketCount++;
     m_totalBytes += p.data.size();
@@ -419,10 +458,14 @@ bool StreamMuxer::SendNextBufferedPacket() {
     AVPacket* pkt = m_buffer->GetNextPacket();
     if (!pkt) return false;
 
-    int ret = av_write_frame(m_formatContext, pkt);
+    int ret = av_interleaved_write_frame(m_formatContext, pkt);
     av_packet_free(&pkt);
 
     if (ret < 0) {
+        char errbuf[256];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        fprintf(stderr, "[StreamMuxer] SendNextBufferedPacket av_interleaved_write_frame failed: %s\n", errbuf);
+        fflush(stderr);
         m_isConnected = false;
         return false;
     }

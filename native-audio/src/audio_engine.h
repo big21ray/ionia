@@ -83,6 +83,9 @@ private:
     // Mic gain (for mixing)
     float m_micGain;
 
+    // Desktop gain (for mixing)
+    float m_desktopGain;
+
     // Callback for AVPackets with PTS
     AudioPacketCallback m_callback;
 

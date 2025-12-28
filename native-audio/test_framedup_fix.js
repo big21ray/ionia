@@ -28,7 +28,7 @@ try {
     }
     console.log('[TEST] ✓ Start succeeded\n');
 
-    console.log('[TEST] Monitoring for 30 seconds...');
+    console.log('[TEST] Monitoring for 60 seconds...');
     console.log('[TEST] Expected behavior:');
     console.log('[TEST]   - VideoTickThread should keep advancing frame numbers');
     console.log('[TEST]   - expectedFrame >= currentFrame (timeline progresses)');
@@ -61,7 +61,7 @@ try {
         
         lastStats = stats;
         
-        if (secondsElapsed >= 30) {
+        if (secondsElapsed >= 60) {
             clearInterval(monitorInterval);
             console.log('\n[TEST] Stopping streamer...');
             streamer.stop();

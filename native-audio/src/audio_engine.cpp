@@ -11,6 +11,7 @@ AudioEngine::AudioEngine()
     , m_startTimeMs(0)
     , m_framesSent(0)
     , m_micGain(1.2f)  // Increased mic gain for better voice level
+    , m_desktopGain(1.8f)  // Increased desktop gain (user reported desktop too low)
     , m_perfFreqInitialized(false)
 {
     // Initialize performance counter frequency for monotonic clock
@@ -147,10 +148,40 @@ void AudioEngine::MixAudio(UINT32 numFrames, std::vector<float>& output) {
 
     std::lock_guard<std::mutex> lock(m_bufferMutex);
 
-    // OBS-like: Mix each source independently
-    // If a source is missing, use silence (0.0)
-    // Never block on synchronization
+    // CRITICAL FIX FOR PITCH SHIFTING:
+    // When buffer accumulates more than 2*numFrames, DROP old frames to prevent pitch issues
+    // This happens when WASAPI delivers faster than we consume
+    // 
+    // Symptoms of buffer accumulation:
+    // - Pitch goes down (audio plays slower as we drain buffer)
+    // - Crackles increase (mixing old+new frames)
+    // - Sync loss (video/audio drift)
+    //
+    // Solution: Keep buffer "fresh" - if we have too much accumulated data,
+    // discard the oldest frames and use only the newest ones
+    
+    // Step 1: Drop old frames if buffer is too large
+    const UINT32 maxBufferFrames = numFrames * 3;  // Allow up to 3x buffer (safety margin)
+    
+    if (m_desktopFramesAvailable > maxBufferFrames) {
+        UINT32 framesToDrop = m_desktopFramesAvailable - numFrames;  // Keep only 1 frame worth
+        UINT32 samplesToDrop = framesToDrop * CHANNELS;
+        fprintf(stderr, "⚠️ DESKTOP BUFFER OVERFLOW: Dropping %u frames to prevent pitch issues\n", framesToDrop);
+        m_desktopBuffer.erase(m_desktopBuffer.begin(), m_desktopBuffer.begin() + samplesToDrop);
+        m_desktopFramesAvailable -= framesToDrop;
+        fflush(stderr);
+    }
+    
+    if (m_micFramesAvailable > maxBufferFrames) {
+        UINT32 framesToDrop = m_micFramesAvailable - numFrames;
+        UINT32 samplesToDrop = framesToDrop * CHANNELS;
+        fprintf(stderr, "⚠️ MIC BUFFER OVERFLOW: Dropping %u frames to prevent pitch issues\n", framesToDrop);
+        m_micBuffer.erase(m_micBuffer.begin(), m_micBuffer.begin() + samplesToDrop);
+        m_micFramesAvailable -= framesToDrop;
+        fflush(stderr);
+    }
 
+    // Step 2: Mix the audio (use what's available, pad with silence if needed)
     const float* desktopData = m_desktopBuffer.data();
     const float* micData = m_micBuffer.data();
 
@@ -160,12 +191,12 @@ void AudioEngine::MixAudio(UINT32 numFrames, std::vector<float>& output) {
             float desktopSample = 0.0f;
             float micSample = 0.0f;
 
-            // OBS-like: Get desktop sample if available, otherwise use silence (0)
+            // Get desktop sample if available, otherwise use silence (0)
             if (frame < m_desktopFramesAvailable) {
-                desktopSample = desktopData[sampleIdx];
+                desktopSample = desktopData[sampleIdx] * m_desktopGain;
             }
 
-            // OBS-like: Get mic sample if available, otherwise use silence (0)
+            // Get mic sample if available, otherwise use silence (0)
             if (frame < m_micFramesAvailable) {
                 micSample = micData[sampleIdx] * m_micGain;
             }
@@ -179,7 +210,7 @@ void AudioEngine::MixAudio(UINT32 numFrames, std::vector<float>& output) {
         }
     }
 
-    // Remove consumed frames from buffers
+    // Step 3: Remove consumed frames from buffers
     const UINT32 desktopSamplesToRemove = (std::min)(numSamples, static_cast<UINT32>(m_desktopBuffer.size()));
     const UINT32 micSamplesToRemove = (std::min)(numSamples, static_cast<UINT32>(m_micBuffer.size()));
 
@@ -199,22 +230,32 @@ void AudioEngine::Tick() {
         return;
     }
 
-    // ============ BLOCK-BASED AUDIO PULLING ============
-    // FIXED ARCHITECTURE: Pull exactly 1024 samples per tick (AAC frame size)
-    // This eliminates encoder buffering lag and PTS desync issues
+    // ============ BLOCK-BASED AUDIO PULLING (WITH SILENCE PADDING) ============
+    // CRITICAL FIX FOR CRACKLES: Always emit 1024-sample frames, even if buffer incomplete
     // 
+    // Previous Problem:
+    // - Tick() returned early if buffer < 1024 samples
+    // - AudioCapture delivers 480-frame chunks (10ms @48kHz)
+    // - First Tick: 480 frames available → return early → NO AUDIO EMITTED
+    // - Second Tick: 960 frames available → return early → NO AUDIO EMITTED  
+    // - Third Tick: 1440 frames available → emit 1024, leaving 416 → AUDIO GAP
+    // - Result: User hears crackles/pops at emission boundaries
+    //
+    // New Solution:
+    // - ALWAYS emit 1024 samples per Tick (AAC requirement)
+    // - If buffer has <1024 samples, pad remainder with SILENCE (0.0)
+    // - This ensures perfectly smooth audio with no gaps
+    // - OBS does this: it uses silence padding to maintain sync
+    //
     // Why this works:
-    // - AAC encoder always expects 1024-sample blocks
-    // - Previous: time-based pulling created irregular chunks (576, 768, 672...)
-    // - Encoder had to buffer internally, causing PTS desync
-    // - Result: dropped packets and audio artifacts
-    // 
-    // Now: Pull exactly when 1024 samples available
-    // Result: Encoder releases 1 packet per Tick, perfect PTS alignment
+    // - Encoder expects 1024 samples, gets exactly 1024 every time
+    // - No buffer underrun clicks
+    // - No PTS jitter
+    // - Silence padding is inaudible (much better than crackling)
 
     const UINT32 AAC_FRAME_SIZE = 1024;  // AAC frame size (non-negotiable)
     
-    // Check if we have enough audio buffered for one AAC frame
+    // Check available frames (don't block if <1024, just use what we have + silence)
     UINT32 availableFrames = 0;
     {
         std::lock_guard<std::mutex> lock(m_bufferMutex);
@@ -222,28 +263,24 @@ void AudioEngine::Tick() {
         
         // Log buffer state
         static int tick_count = 0;
-        if (tick_count < 20 || tick_count % 50 == 0) {
-            fprintf(stderr, "[AudioEngine::Tick] BLOCK MODE: desktop=%u frames, mic=%u frames, total=%u (need %u for AAC)\n",
-                m_desktopFramesAvailable, m_micFramesAvailable, availableFrames, AAC_FRAME_SIZE);
+        if (tick_count < 30 || tick_count % 50 == 0) {
+            fprintf(stderr, "[AudioEngine::Tick] BLOCK MODE: desktop=%u, mic=%u, total=%u (need %u) - %s\n",
+                m_desktopFramesAvailable, m_micFramesAvailable, availableFrames, AAC_FRAME_SIZE,
+                availableFrames >= AAC_FRAME_SIZE ? "READY" : "PADDING WITH SILENCE");
             fflush(stderr);
         }
         
-        // Warn if buffer is building (means WASAPI is faster than we're pulling)
+        // Warn if buffer is building (WASAPI faster than pull)
         if (availableFrames > AAC_FRAME_SIZE * 10 && tick_count % 20 == 0) {
-            fprintf(stderr, "⚠️ AUDIO BUFFER BUILDING: %u frames queued (WASAPI faster than pull rate)\n", availableFrames);
+            fprintf(stderr, "⚠️ AUDIO BUFFER BUILDING: %u frames (WASAPI delivering faster than we pull)\n", availableFrames);
             fflush(stderr);
         }
         
         tick_count++;
     }
 
-    // Only process if we have at least one full AAC frame
-    if (availableFrames < AAC_FRAME_SIZE) {
-        return;  // Wait for more audio to accumulate
-    }
-
-    // Mix EXACTLY 1024 samples (AAC frame size)
-    // This ensures encoder gets perfectly aligned blocks
+    // ALWAYS mix exactly 1024 samples
+    // If buffer has <1024, MixAudio will use what's available + silence padding
     std::vector<float> mixedAudio;
     MixAudio(AAC_FRAME_SIZE, mixedAudio);
 
@@ -253,7 +290,7 @@ void AudioEngine::Tick() {
 
     AudioPacket packet = m_packetManager.CreatePacket(
         mixedAudio.data(),
-        AAC_FRAME_SIZE,  // ← ALWAYS exactly 1024 samples
+        AAC_FRAME_SIZE,  // ← ALWAYS exactly 1024 samples (NO EXCEPTIONS)
         ptsFrames
     );
 

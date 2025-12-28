@@ -1,5 +1,7 @@
 #include "stream_buffer.h"
 #include <libavutil/mem.h>
+#include <libavutil/mathematics.h>
+#include <libavutil/rational.h>
 #include <algorithm>
 
 StreamBuffer::StreamBuffer(size_t maxSize, int64_t maxLatencyMs)
@@ -13,6 +15,38 @@ StreamBuffer::StreamBuffer(size_t maxSize, int64_t maxLatencyMs)
 
 StreamBuffer::~StreamBuffer() {
     Clear();
+}
+
+void StreamBuffer::SetStreamInfo(int videoStreamIndex, AVRational videoTimeBase,
+                                 int audioStreamIndex, AVRational audioTimeBase) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_videoStreamIndex = videoStreamIndex;
+    m_audioStreamIndex = audioStreamIndex;
+    m_videoTimeBase = videoTimeBase;
+    m_audioTimeBase = audioTimeBase;
+}
+
+int64_t StreamBuffer::ToDtsMs(const AVPacket* packet) const {
+    if (!packet) return 0;
+
+    int64_t dts = packet->dts;
+    if (dts == AV_NOPTS_VALUE) {
+        dts = packet->pts;
+    }
+    if (dts == AV_NOPTS_VALUE) {
+        return 0;
+    }
+
+    AVRational tb{1, 1000};
+    if (packet->stream_index == m_videoStreamIndex) {
+        tb = m_videoTimeBase;
+    } else if (packet->stream_index == m_audioStreamIndex) {
+        tb = m_audioTimeBase;
+    }
+
+    // Convert DTS to microseconds for ordering/latency decisions.
+    // Using microseconds avoids ms-level ties (e.g., audio 33.333ms vs video 33.0ms).
+    return av_rescale_q(dts, tb, AVRational{1, AV_TIME_BASE});
 }
 
 bool StreamBuffer::CanAcceptPacket() {
@@ -70,9 +104,9 @@ bool StreamBuffer::AddPacket(AVPacket* packet) {
         
         static int check_count = 0;
         if (check_count < 10 || check_count % 100 == 0) {
-            fprintf(stderr, "[StreamBuffer] AddPacket: size=%zu, latency=%lld ms (max=%lld), front_dts=%lld, back_dts=%lld\n",
+                    fprintf(stderr, "[StreamBuffer] AddPacket: size=%zu, latency=%lld ms (max=%lld), front_dts_us=%lld, back_dts_us=%lld\n",
                     m_packets.size(), latency, m_maxLatencyMs, 
-                    m_packets.front().dts, m_packets.back().dts);
+                        m_packets.front().dtsUs, m_packets.back().dtsUs);
             fflush(stderr);
         }
         check_count++;
@@ -107,17 +141,18 @@ bool StreamBuffer::AddPacket(AVPacket* packet) {
         }
     }
     
-    // Insert packet SORTED BY DTS (maintain monotonic order)
+    // Insert packet SORTED BY DTS (in microseconds)
+    const int64_t packetDtsUs = ToDtsMs(packet);
     auto it = std::upper_bound(
         m_packets.begin(),
         m_packets.end(),
-        packet->dts,
-        [](int64_t dts, const QueuedPacket& qp) {
-            return dts < qp.dts;
+        packetDtsUs,
+        [](int64_t dtsUs, const QueuedPacket& qp) {
+            return dtsUs < qp.dtsUs;
         }
     );
     
-    m_packets.insert(it, { packet, packet->dts });
+    m_packets.insert(it, { packet, packetDtsUs });
     m_packetsAdded++;
     
     return true;
@@ -137,8 +172,8 @@ AVPacket* StreamBuffer::GetNextPacket() {
     // Log buffer state
     static int send_count = 0;
     if (send_count < 10 || send_count % 100 == 0) {
-        fprintf(stderr, "[StreamBuffer] GetNextPacket: sent_dts=%lld, remaining=%zu\n",
-                qp.dts, m_packets.size());
+        fprintf(stderr, "[StreamBuffer] GetNextPacket: sent_dts_us=%lld, remaining=%zu\n",
+            qp.dtsUs, m_packets.size());
         fflush(stderr);
     }
     send_count++;
@@ -152,16 +187,13 @@ int64_t StreamBuffer::GetDtsLatencyMs() const {
         return 0;
     }
     
-    int64_t earliest_dts = m_packets.front().dts;
-    int64_t latest_dts = m_packets.back().dts;
+    int64_t earliest_dts = m_packets.front().dtsUs;
+    int64_t latest_dts = m_packets.back().dtsUs;
     
     int64_t dts_span = latest_dts - earliest_dts;
-    
-    // Convert from time_base units to milliseconds
-    // Assuming reasonable time_base (typically 1/1000 for audio or 1/fps for video)
-    // For safety, assume this is already in reasonable units
-    // Return as-is (caller should rescale if needed)
-    return dts_span;
+
+    // Stored in microseconds; convert to milliseconds.
+    return dts_span / 1000;
 }
 
 size_t StreamBuffer::GetSize() const {

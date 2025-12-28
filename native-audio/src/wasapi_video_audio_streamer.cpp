@@ -21,6 +21,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 
 /* =========================================================
    VideoAudioStreamerAddon
@@ -274,6 +275,17 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
                     static_cast<uint64_t>(p.duration), m_audioFramesReceived.load());
             fflush(stderr);
             
+            // CRITICAL VALIDATION: AAC LC requires exactly 1024 samples per frame
+            // Variable frame sizes cause crackles, pitch shift, and jitter
+            if (p.duration != 1024) {
+                fprintf(stderr, "[AudioCallback] ❌ AUDIO FRAME SIZE ERROR: got %llu samples, expected 1024\n",
+                        static_cast<uint64_t>(p.duration));
+                fprintf(stderr, "[AudioCallback] ❌ This frame size mismatch WILL cause audible artifacts\n");
+                fprintf(stderr, "[AudioCallback] ❌ AAC encoder assumes fixed 1024-sample frames\n");
+                fflush(stderr);
+                // Continue anyway (don't drop), but this explains crackling
+            }
+            
             auto encoded = m_audioEncoder->EncodeFrames(
                 reinterpret_cast<const float*>(p.data.data()),
                 static_cast<uint32_t>(p.duration)
@@ -286,10 +298,67 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
                     encoded.size(), m_audioFramesEncoded.load());
             fflush(stderr);
             
+            fprintf(stderr, "[AudioCallback] Got %zu encoded packets (total frames encoded: %llu)\n", 
+                    encoded.size(), m_audioFramesEncoded.load());
+            fflush(stderr);
+            
+            // ============ DIAGNOSTIC 1: Record raw AAC to file ============
+            static std::ofstream aac_debug_file;
+            static bool aac_file_opened = false;
+            if (!aac_file_opened) {
+                aac_debug_file.open("C:\\Users\\Karmine Corp\\Documents\\Ionia\\native-audio\\debug_audio.aac", std::ios::binary);
+                if (aac_debug_file.is_open()) {
+                    fprintf(stderr, "[AudioCallback] ✅ AAC debug file opened for recording\n");
+                    fflush(stderr);
+                    aac_file_opened = true;
+                } else {
+                    fprintf(stderr, "[AudioCallback] ❌ Failed to open AAC debug file\n");
+                    fflush(stderr);
+                }
+            }
+            
             for (size_t i = 0; i < encoded.size(); i++) {
                 try {
                     auto& pkt = encoded[i];
-                    fprintf(stderr, "[AudioCallback] Writing packet %zu/%zu, size=%zu\n", i, encoded.size(), pkt.size());
+                    
+            // ============ DIAGNOSTIC 2: Encoder output quality (timing) ============
+                    static int packet_count = 0;
+                    static int64_t last_packet_time_ns = 0;  // nanoseconds for higher precision
+                    int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::high_resolution_clock::now().time_since_epoch()
+                    ).count();
+                    int64_t delta_ms = (last_packet_time_ns > 0) ? (now_ns - last_packet_time_ns) / 1000000 : 0;
+                    last_packet_time_ns = now_ns;
+                    
+                    if (packet_count % 10 == 0) {
+                        fprintf(stderr, "[AudioCallback] PKT#%d: size=%zu bytes, delta=%lldms (expect ~21ms)\n", 
+                                packet_count, pkt.size(), delta_ms);
+                        fflush(stderr);
+                    }
+                    packet_count++;
+                    
+                    // Write to AAC file with ADTS header (for VLC playability)
+                    if (aac_debug_file.is_open()) {
+                        // ADTS header for AAC-LC, 48kHz, stereo
+                        // Sync word (0xFFF), profile (0=LC), sample rate (3=48kHz), channels (2=stereo)
+                        uint16_t frame_size = static_cast<uint16_t>(pkt.data.size() + 7);  // +7 for ADTS header
+                        
+                        // ADTS header (7 bytes):
+                        uint8_t adts[7];
+                        adts[0] = 0xFF;                          // Sync word high
+                        adts[1] = 0xF1;                          // Sync word low + MPEG-4 + profile
+                        adts[2] = (3 << 6) | (2 << 2) | 0;      // Sample rate (3=48kHz) + channels (2) + orig
+                        adts[3] = (frame_size >> 11) & 0x03;    // Frame size high
+                        adts[4] = (frame_size >> 3) & 0xFF;     // Frame size mid
+                        adts[5] = ((frame_size << 5) & 0xE0) | 0; // Frame size low + RDB 5 bits
+                        adts[6] = 0;                             // RDB 11 bits (all zeros for no raw data block)
+                        
+                        aac_debug_file.write(reinterpret_cast<const char*>(adts), 7);
+                        aac_debug_file.write(reinterpret_cast<const char*>(pkt.data.data()), pkt.data.size());
+                        aac_debug_file.flush();
+                    }
+                    
+                    fprintf(stderr, "[AudioCallback] Writing packet %zu/%zu\n", i, encoded.size());
                     fflush(stderr);
                     
                     if (!m_streamMuxer) {
@@ -299,8 +368,15 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
                     }
                     
                     bool written = m_streamMuxer->WriteAudioPacket(pkt);
-                    fprintf(stderr, "[AudioCallback] Packet %zu write=%s\n", i, written ? "true" : "false");
-                    fflush(stderr);
+                    
+                    // ============ DIAGNOSTIC 3: Packet write failures (network drops) ============
+                    if (!written) {
+                        fprintf(stderr, "[AudioCallback] ❌ PACKET DROP: Packet %zu NOT written\n", i);
+                        fflush(stderr);
+                    } else {
+                        fprintf(stderr, "[AudioCallback] ✅ Packet %zu write success\n", i);
+                        fflush(stderr);
+                    }
                     
                     if (written) {
                         uint64_t newCount = m_audioPackets.fetch_add(1) + 1;
@@ -876,9 +952,12 @@ void VideoAudioStreamerAddon::AudioTickThread() {
                     fflush(stderr);
                 }
                 
-                fprintf(stderr, "[AudioTickThread] Loop %d: About to sleep 10ms\n", tickCount);
+                // CRITICAL: Sleep must match AAC frame cadence, not arbitrary 10ms
+                // 1024 samples @ 48 kHz = 21.333... ms
+                // This ensures AudioEngine::Tick() is called at exactly the right rate
+                fprintf(stderr, "[AudioTickThread] Loop %d: About to sleep 21.333ms (AAC frame cadence)\n", tickCount);
                 fflush(stderr);
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                std::this_thread::sleep_for(std::chrono::microseconds(21333));
                 fprintf(stderr, "[AudioTickThread] Loop %d: Woke from sleep\n", tickCount);
                 fflush(stderr);
                 
@@ -1010,8 +1089,23 @@ void VideoAudioStreamerAddon::NetworkSendThread() {
 void VideoAudioStreamerAddon::OnAudioData(const BYTE* data,
                                          UINT32 frames,
                                          const char* src,
-                                         WAVEFORMATEX*) {
+                                         WAVEFORMATEX* format) {
     if (!m_audioEngine || !m_audioEngine->IsRunning()) return;
+    
+    // CRITICAL: Log the sample rate being received
+    static bool logged_desktop = false, logged_mic = false;
+    if (format) {
+        if (strcmp(src, "desktop") == 0 && !logged_desktop) {
+            fprintf(stderr, "[OnAudioData] DESKTOP: format->nSamplesPerSec = %u Hz\n", format->nSamplesPerSec);
+            fflush(stderr);
+            logged_desktop = true;
+        } else if (strcmp(src, "mic") == 0 && !logged_mic) {
+            fprintf(stderr, "[OnAudioData] MIC: format->nSamplesPerSec = %u Hz\n", format->nSamplesPerSec);
+            fflush(stderr);
+            logged_mic = true;
+        }
+    }
+    
     m_audioEngine->FeedAudioData(
         reinterpret_cast<const float*>(data), frames, src);
 }
