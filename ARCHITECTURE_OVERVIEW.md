@@ -169,14 +169,23 @@ Microphone (native format)        →  ConvertToFloat32()  →  Resample(48kHz) 
 ### 3. **AudioEngine** (Clock Master - OBS-like)
 **File:** [native-audio/src/audio_engine.h/cpp](native-audio/src/audio_engine.h)
 
-**Purpose:** Produces a stable, streaming-friendly audio timeline: mixes desktop + mic and emits audio in AAC-friendly framing.
+**Purpose:** Produces a stable audio timeline by buffering per-source audio, mixing desktop+mic, and emitting AAC-friendly PCM blocks with deterministic PTS.
 
 **Key Concepts:**
-- **Fixed AAC framing:** AAC-LC wants 1024 samples per frame; emitting fixed-size blocks avoids encoder buffering drift.
-- **Non-blocking mixing:** If inputs are short, the engine pads with silence to keep cadence stable.
-- **Source-driven cadence:** The engine emits output in consistent blocks, not variable-sized “whatever elapsed time suggests”.
+- **Two consumption styles (important):**
+  - **Streaming style:** keep a steady cadence (fixed-size blocks) even through short-term capture jitter.
+  - **Recording style:** prefer emitting only real captured samples (avoid inserting silence mid-stream).
+- **Fixed AAC framing:** AAC-LC is naturally aligned to 1024 samples/frame; keeping output in 1024-sample units makes the encoder+PTS model predictable.
+- **Non-blocking mixing:** mixing never blocks waiting for synchronization; missing data becomes silence *only when the chosen consumption style allows it*.
+- **Explicit PTS in sample frames:** PTS advances by “number of audio frames emitted” (at 48kHz), not by wall-clock guesses.
 
-**How AudioEngine works (high level):**
+**How AudioEngine works (current thought process):**
+
+Audio capture arrives as bursts (often ~480 frames per callback at 48kHz). The engine’s job is to smooth those bursts into a stream of fixed-size blocks that the AAC encoder can consume without constantly buffering/guessing.
+
+The engine therefore splits responsibilities:
+- **Capture side (push):** accept whatever size the OS provides and buffer it.
+- **Consume side (pull):** produce exactly $N$ frames (typically 1024) with a stable, monotonically increasing PTS.
 
 1. **Feed Audio Data (from WASAPI callbacks):**
    ```cpp
@@ -185,18 +194,29 @@ Microphone (native format)        →  ConvertToFloat32()  →  Resample(48kHz) 
    // Data is buffered (thread-safe)
    ```
 
-2. **Tick() emits exactly one AAC frame worth of samples:**
-   ```cpp
-   // Conceptual: the tick produces a fixed 1024-sample block
-   const uint32_t AAC_FRAME = 1024;
-   MixAudio(AAC_FRAME, output, /*silencePadIfShort=*/true);
-   callback(output, /*ptsInFrames=*/framesSent);
-   framesSent += AAC_FRAME;
-   ```
+   Design notes:
+   - Buffers are per-source to allow mode selection (`desktop` / `mic` / `both`).
+   - The engine may apply per-source gains (mic and desktop) before mixing.
+   - If buffers build up too much, the engine may drop old frames to prevent “buffer playback” behavior (pitch-down / slow-down). That drop strategy is useful for live scenarios; for recording we avoid creating artificial discontinuities by controlling *when* we emit blocks.
 
-3. **Scheduling:**
-   - The native addon drives tick cadence using a monotonic clock (`steady_clock` + `sleep_until`) with bounded catch-up.
-   - Reason: Windows sleep granularity can drift; `sleep_until` keeps long-term cadence stable.
+2. **Two ways to pull audio out of the engine (stream vs record):**
+
+   A) **Streaming cadence (Tick model)**
+   - The streaming path wants a stable cadence: even if capture delivery jitters, the output should remain steady so RTMP pacing and A/V sync stay clean.
+   - In this mode, `Tick()` emits exactly 1024 frames per tick.
+   - If the buffers don’t have enough, it *may* pad with silence (depends on branch behavior), because “real-time continuity” matters more than “never insert silence”.
+
+   B) **Recording cadence (event-driven block draining)**
+   - Recording wants the file to reflect what was captured; inserting silence in the middle of a recording is usually perceived as clicks/crackles or gaps.
+   - The recorder therefore drains audio in 1024-frame blocks only when enough real audio is present.
+   - Mechanically: on each WASAPI callback, after `FeedAudioData()`, it repeatedly calls:
+     - `TryPopMixedAudioPacket(1024, mode, outPacket)`
+     until the engine says “not enough data”.
+
+   Why this works:
+   - You still satisfy AAC’s 1024-frame expectation.
+   - You avoid mid-stream silence padding artifacts.
+   - PTS progression stays exact because you advance PTS by the number of frames actually emitted.
 
 4. **Mixing Logic:**
    ```cpp
@@ -211,12 +231,44 @@ Microphone (native format)        →  ConvertToFloat32()  →  Resample(48kHz) 
    ```
 
 **Why this design?**
-- OBS uses a "clock master" approach to ensure smooth, artifact-free streaming
-- Never blocks waiting for audio (always produces output)
-- Handles underruns gracefully (produces silence)
-- PTS stays synchronized with real time
+- For **streaming**, a clock-master cadence avoids long-term drift and keeps RTMP pacing stable.
+- For **recording**, event-driven block draining avoids inserting silence and reduces crackles.
+- Both modes share the same buffered mixing core; they differ only in *when* they choose to emit 1024-frame blocks.
+
+**Why it works for both recorder and streamer right now**
+- The streamer remains free to run its own steady cadence (and tolerate capture jitter) without depending on JS timing.
+- The recorder emits only when enough data exists, avoiding “partial block → silence pad” discontinuities that were causing crackles.
+- In “both” mode, the recorder waits for both mic and desktop to have a full block before emitting, which avoids one source intermittently dropping to silence.
+- A small attenuation is applied when mixing both sources to reduce clipping distortion that can sound like crackles.
 
 ---
+
+### 3b. **VideoEngine** (CFR pacing + frame duplication)
+**File:** [native-audio/src/wasapi_video_engine.h/cpp](native-audio/src/wasapi_video_engine.h)
+
+**Purpose:** Provide constant-frame-rate (CFR) video timing independent of capture jitter.
+
+**Thought process**
+
+Desktop capture is not perfectly periodic:
+- DXGI capture may deliver frames late or not at all (no desktop changes, GPU scheduling, multi-monitor quirks).
+- If you “encode whenever capture provides a frame”, the output becomes variable-rate, which is awkward for streaming and can cause timestamp irregularities.
+
+So `VideoEngine` becomes the **video clock master**:
+- It defines “what time it is in video frames” using a monotonic start time and a target FPS.
+- It computes an `expectedFrameNumber` from elapsed time.
+- It ensures the pipeline produces exactly one frame per frame interval.
+
+**How it runs**
+- **CaptureThread** pushes best-effort frames into a small ring buffer.
+- **VideoTickThread** checks `expectedFrameNumber` and, if behind, emits frames until it catches up:
+   - If a new captured frame exists → encode that.
+   - If not → duplicate the last good frame.
+
+**Why this helps both streaming and recording**
+- Streaming gets steady output pacing (critical for RTMP).
+- Recording gets predictable timestamps and consistent MP4 duration.
+- When capture lags, duplicating the last frame is usually less noticeable than slowing down the entire timeline (and it avoids audio/video drift).
 
 ### 4. **VideoEncoder** (libavcodec - H.264)
 **File:** [native-audio/src/video_encoder.h/cpp](native-audio/src/video_encoder.h)

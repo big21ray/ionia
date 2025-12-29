@@ -1,4 +1,11 @@
 @echo off
+setlocal
+
+REM Non-interactive by default. Use:
+REM   build_all.bat --interactive
+set "BUILD_INTERACTIVE=0"
+if /I "%~1"=="--interactive" set "BUILD_INTERACTIVE=1"
+
 echo ========================================
 echo Building WASAPI Capture Native Module
 echo Building for BOTH Node.js and Electron
@@ -79,7 +86,7 @@ if errorlevel 1 (
     echo 3. Install FFmpeg via vcpkg: vcpkg install ffmpeg:x64-windows
     echo 4. Update FFMPEG_INCLUDE and FFMPEG_LIB paths
     echo.
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -90,7 +97,7 @@ call :copy_ffmpeg_dlls
 
 if not exist "%BUILD_OUTPUT%\wasapi_video_audio.node" (
     echo ERROR: Compiled module not found at %BUILD_OUTPUT%\wasapi_video_audio.node
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -115,7 +122,7 @@ if exist "%BUILD_OUTPUT%\wasapi_video_audio.node" (
     echo To use Node.js build later, copy from build\Release-NodeJS\ to build\Release\
     echo.
 )
-pause
+    call :maybe_pause
 
 REM ========================================
 REM BUILD 2: Electron Build
@@ -126,25 +133,9 @@ echo [BUILD 2/2] Building for Electron
 echo ========================================
 echo.
 
-REM Setup Visual Studio environment for Electron build
-echo [1/3] Setting up Visual Studio environment...
-call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvarsall.bat" x64
-if errorlevel 1 (
-    echo ERROR: Failed to setup Visual Studio environment
-    echo Continuing anyway (node-gyp may still work)...
-)
-
-REM Build with node-gyp for Electron
-echo [2/3] Building native module with node-gyp for Electron...
-echo Target: Electron 28.0.0
-if exist "%~dp0\..\node_modules\.bin\node-gyp.cmd" (
-    call "%~dp0\..\node_modules\.bin\node-gyp.cmd" rebuild --target=28.0.0 --arch=x64 --disturl=https://electronjs.org/headers --msvs_version=2022
-) else if exist "%~dp0node_modules\.bin\node-gyp.cmd" (
-    call "%~dp0node_modules\.bin\node-gyp.cmd" rebuild --target=28.0.0 --arch=x64 --disturl=https://electronjs.org/headers --msvs_version=2022
-) else (
-    REM Try global node-gyp
-    node-gyp rebuild --target=28.0.0 --arch=x64 --disturl=https://electronjs.org/headers --msvs_version=2022
-)
+REM Build for Electron using the dedicated script (keeps Electron version in sync)
+echo [1/3] Building native module for Electron...
+call "%~dp0build_electron.bat"
 if errorlevel 1 (
     echo.
     echo ERROR: Electron build failed!
@@ -155,7 +146,7 @@ if errorlevel 1 (
     echo 3. Install FFmpeg via vcpkg: vcpkg install ffmpeg:x64-windows
     echo 4. Update FFMPEG_INCLUDE and FFMPEG_LIB paths
     echo.
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -165,7 +156,7 @@ call :copy_ffmpeg_dlls
 
 if not exist "%BUILD_OUTPUT%\wasapi_video_audio.node" (
     echo ERROR: Compiled module not found at %BUILD_OUTPUT%\wasapi_video_audio.node
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -175,7 +166,7 @@ echo Electron build completed successfully!
 echo ========================================
 echo.
 echo Output: %BUILD_OUTPUT%\wasapi_video_audio.node
-echo Compiled for Electron 28.0.0
+echo Compiled for Electron
 echo.
 
 REM Verify DLLs are present
@@ -188,8 +179,12 @@ echo ========================================
 echo.
 echo Both Node.js and Electron builds are ready.
 echo.
-pause
+call :maybe_pause
 exit /b 0
+
+:maybe_pause
+if "%BUILD_INTERACTIVE%"=="1" pause
+goto :eof
 
 REM ========================================
 REM Function: Copy FFmpeg DLLs

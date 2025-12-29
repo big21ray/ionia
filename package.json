@@ -8,14 +8,14 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "build:electron": "tsc -p tsconfig.node.json && node -e \"require('fs').copyFileSync('electron/preload.js', 'dist-electron/electron/preload.js')\"",
-    "build:native": "cd native-audio && node-gyp rebuild --msvs_version=2022",
-    "rebuild:native": "cd native-audio && node-gyp clean && node-gyp rebuild --msvs_version=2022",
+    "build:native": "cmd /c native-audio\\build_all.bat",
+    "rebuild:native": "cmd /c native-audio\\build_all.bat",
     "build:native:electron": "powershell -ExecutionPolicy Bypass -File ./build-native-electron.ps1",
     "diagnose:native": "cd native-audio && powershell -ExecutionPolicy Bypass -File ./diagnose_electron_module.ps1",
     "preview": "vite preview",
     "electron:dev": "npm run build:electron && concurrently -k -s first \"npm run dev\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:dev:win": "powershell -ExecutionPolicy Bypass -File ./start-dev.ps1",
-    "electron:build": "npm run build && npm run build:electron && npm run build:native && electron-builder"
+    "electron:build": "npm run build && npm run build:electron && npm run build:native:electron && electron-builder"
   },
   "keywords": [
     "electron",
