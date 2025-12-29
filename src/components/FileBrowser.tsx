@@ -2,13 +2,16 @@ interface FileBrowserProps {
   onFileSelect: (path: string) => void;
 }
 
+const toIoniaVideoUrl = (pathOrUrl: string) =>
+  `ionia-video://open?path=${encodeURIComponent(pathOrUrl)}`;
+
 const FileBrowser = ({ onFileSelect }: FileBrowserProps) => {
   const handleOpenFile = async () => {
     if (window.electronAPI) {
       try {
         const result = await window.electronAPI.openFileDialog();
         if (result && !result.canceled && result.filePaths.length > 0) {
-          onFileSelect(result.filePaths[0]);
+          onFileSelect(toIoniaVideoUrl(result.filePaths[0]));
         }
       } catch (error) {
         console.error('Error opening file:', error);

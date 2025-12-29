@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, protocol } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
@@ -10,6 +10,146 @@ const require = createRequire(import.meta.url);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const IONIA_VIDEO_SCHEME = 'ionia-video';
+
+// Must be called before app is ready.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: IONIA_VIDEO_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+]);
+
+let ioniaVideoProtocolRegistered = false;
+
+const normalizeRequestedVideoPath = (rawPathOrUrl: string): string | null => {
+  const trimmed = (rawPathOrUrl || '').trim();
+  if (!trimmed) return null;
+
+  // Renderer may pass either a Windows path (C:\...) or a file:// URL.
+  if (trimmed.startsWith('file://')) {
+    try {
+      const url = new URL(trimmed);
+      let pathname = decodeURIComponent(url.pathname);
+      // On Windows, file URL paths often look like /C:/Users/...
+      if (process.platform === 'win32' && pathname.startsWith('/')) {
+        pathname = pathname.slice(1);
+      }
+      return path.normalize(pathname);
+    } catch {
+      return null;
+    }
+  }
+
+  return path.normalize(trimmed);
+};
+
+const guessVideoMimeType = (filePath: string): string => {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.mp4':
+      return 'video/mp4';
+    case '.webm':
+      return 'video/webm';
+    case '.ogg':
+    case '.ogv':
+      return 'video/ogg';
+    case '.mov':
+      return 'video/quicktime';
+    case '.mkv':
+      return 'video/x-matroska';
+    case '.avi':
+      return 'video/x-msvideo';
+    case '.wmv':
+      return 'video/x-ms-wmv';
+    case '.flv':
+      return 'video/x-flv';
+    case '.m4v':
+      return 'video/x-m4v';
+    default:
+      return 'application/octet-stream';
+  }
+};
+
+const registerIoniaVideoProtocol = () => {
+  if (ioniaVideoProtocolRegistered) return;
+  ioniaVideoProtocolRegistered = true;
+
+  protocol.registerStreamProtocol(IONIA_VIDEO_SCHEME, (request, callback) => {
+    try {
+      const url = new URL(request.url);
+      const rawPathOrUrl = url.searchParams.get('path') || '';
+      const requestedPath = normalizeRequestedVideoPath(rawPathOrUrl);
+      if (!requestedPath || !path.isAbsolute(requestedPath)) {
+        callback({ statusCode: 400, data: null as any });
+        return;
+      }
+
+      if (!fs.existsSync(requestedPath)) {
+        callback({ statusCode: 404, data: null as any });
+        return;
+      }
+
+      const stat = fs.statSync(requestedPath);
+      if (!stat.isFile()) {
+        callback({ statusCode: 404, data: null as any });
+        return;
+      }
+
+      const totalSize = stat.size;
+      const mimeType = guessVideoMimeType(requestedPath);
+
+      const headers: Record<string, string> = {
+        'Content-Type': mimeType,
+        'Accept-Ranges': 'bytes',
+      };
+
+      const rangeHeader =
+        (request.headers?.Range as string | undefined) ||
+        (request.headers?.range as string | undefined);
+
+      if (rangeHeader) {
+        const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader);
+        if (!match) {
+          callback({ statusCode: 416, headers, data: null as any });
+          return;
+        }
+
+        const start = match[1] ? Number(match[1]) : 0;
+        const end = match[2] ? Number(match[2]) : totalSize - 1;
+
+        if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= totalSize) {
+          callback({ statusCode: 416, headers, data: null as any });
+          return;
+        }
+
+        const clampedEnd = Math.min(end, totalSize - 1);
+        const chunkSize = clampedEnd - start + 1;
+
+        headers['Content-Range'] = `bytes ${start}-${clampedEnd}/${totalSize}`;
+        headers['Content-Length'] = String(chunkSize);
+
+        const stream = fs.createReadStream(requestedPath, { start, end: clampedEnd });
+        callback({ statusCode: 206, headers, data: stream as any });
+        return;
+      }
+
+      headers['Content-Length'] = String(totalSize);
+      const stream = fs.createReadStream(requestedPath);
+      callback({ statusCode: 200, headers, data: stream as any });
+    } catch (error) {
+      console.error('❌ ionia-video protocol error:', error);
+      callback({ statusCode: 500, data: null as any });
+    }
+  });
+};
 
 // Load native VideoAudioRecorder module
 let VideoAudioRecorder: any = null;
@@ -73,6 +213,8 @@ let streamingRtmpUrl: string | null = null;
 
 
 const createWindow = () => {
+  registerIoniaVideoProtocol();
+
   // Create the browser window
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
   const preloadPath = isDev

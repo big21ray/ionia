@@ -7,8 +7,22 @@ import StreamButton from './components/StreamButton';
 function App() {
   const [videoPath, setVideoPath] = useState<string | null>(null);
 
+  const toIoniaVideoUrl = (pathOrUrl: string) =>
+    `ionia-video://open?path=${encodeURIComponent(pathOrUrl)}`;
+
   const handleFileSelect = (path: string) => {
-    setVideoPath(path);
+    if (
+      path.startsWith('blob:') ||
+      path.startsWith('ionia-video://') ||
+      path.startsWith('http://') ||
+      path.startsWith('https://')
+    ) {
+      setVideoPath(path);
+      return;
+    }
+
+    // Covers raw Windows paths and file:// URLs.
+    setVideoPath(toIoniaVideoUrl(path));
   };
 
   return (
