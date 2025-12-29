@@ -21,15 +21,9 @@ bool DesktopDuplication::Initialize() {
         return true;
     }
 
-    // Initialize D3D11
+    // Initialize D3D11 + Desktop Duplication (select a valid adapter/output)
     if (!InitializeD3D()) {
-        fprintf(stderr, "[DesktopDuplication] Failed to initialize D3D11\n");
-        return false;
-    }
-
-    // Initialize Desktop Duplication
-    if (!InitializeDuplication()) {
-        fprintf(stderr, "[DesktopDuplication] Failed to initialize duplication\n");
+        fprintf(stderr, "[DesktopDuplication] Failed to initialize D3D11/Desktop Duplication\n");
         Cleanup();
         return false;
     }
@@ -50,38 +44,6 @@ bool DesktopDuplication::InitializeD3D() {
         return false;
     }
 
-    // Get adapter (GPU)
-    hr = factory->EnumAdapters1(0, &m_adapter);
-    if (FAILED(hr)) {
-        fprintf(stderr, "[DesktopDuplication] EnumAdapters1 failed: 0x%08X\n", hr);
-        return false;
-    }
-
-    // Get output (monitor)
-    hr = m_adapter->EnumOutputs(0, &m_output);
-    if (FAILED(hr)) {
-        fprintf(stderr, "[DesktopDuplication] EnumOutputs failed: 0x%08X\n", hr);
-        return false;
-    }
-
-    // Query IDXGIOutput1
-    hr = m_output.As(&m_output1);
-    if (FAILED(hr)) {
-        fprintf(stderr, "[DesktopDuplication] QueryInterface IDXGIOutput1 failed: 0x%08X\n", hr);
-        return false;
-    }
-
-    // Get output description
-    hr = m_output1->GetDesc(&m_outputDesc);
-    if (FAILED(hr)) {
-        fprintf(stderr, "[DesktopDuplication] GetDesc failed: 0x%08X\n", hr);
-        return false;
-    }
-
-    m_desktopWidth = m_outputDesc.DesktopCoordinates.right - m_outputDesc.DesktopCoordinates.left;
-    m_desktopHeight = m_outputDesc.DesktopCoordinates.bottom - m_outputDesc.DesktopCoordinates.top;
-
-    // Create D3D11 device - IMPORTANT: Use D3D_DRIVER_TYPE_HARDWARE with the adapter
     D3D_FEATURE_LEVEL featureLevels[] = {
         D3D_FEATURE_LEVEL_11_1,
         D3D_FEATURE_LEVEL_11_0,
@@ -89,50 +51,125 @@ bool DesktopDuplication::InitializeD3D() {
         D3D_FEATURE_LEVEL_10_0
     };
 
-    D3D_FEATURE_LEVEL featureLevel;
-    hr = D3D11CreateDevice(
-        m_adapter.Get(),
-        D3D_DRIVER_TYPE_HARDWARE,  // CRITICAL: Must be HARDWARE when using a specific adapter
-        nullptr,
-        0,
-        featureLevels,
-        ARRAYSIZE(featureLevels),
-        D3D11_SDK_VERSION,
-        &m_device,
-        &featureLevel,
-        &m_context
-    );
+    // Enumerate adapters/outputs and pick the first output that is AttachedToDesktop
+    // and for which DuplicateOutput succeeds. This avoids hardcoding adapter0/output0
+    // which can fail on hybrid GPU systems or when output0 isn't attached.
+    for (UINT adapterIndex = 0;; adapterIndex++) {
+        ComPtr<IDXGIAdapter1> adapter;
+        hr = factory->EnumAdapters1(adapterIndex, &adapter);
+        if (hr == DXGI_ERROR_NOT_FOUND) {
+            break;
+        }
+        if (FAILED(hr) || !adapter) {
+            continue;
+        }
 
-    if (FAILED(hr)) {
-        fprintf(stderr, "[DesktopDuplication] D3D11CreateDevice with HARDWARE failed: 0x%08X, trying UNKNOWN\n", hr);
-        // Fallback to D3D_DRIVER_TYPE_UNKNOWN
-        hr = D3D11CreateDevice(
-            m_adapter.Get(),
-            D3D_DRIVER_TYPE_UNKNOWN,
-            nullptr,
-            0,
-            featureLevels,
-            ARRAYSIZE(featureLevels),
-            D3D11_SDK_VERSION,
-            &m_device,
-            &featureLevel,
-            &m_context
-        );
-        
-        if (FAILED(hr)) {
-            fprintf(stderr, "[DesktopDuplication] D3D11CreateDevice failed: 0x%08X\n", hr);
-            return false;
+        for (UINT outputIndex = 0;; outputIndex++) {
+            ComPtr<IDXGIOutput> output;
+            hr = adapter->EnumOutputs(outputIndex, &output);
+            if (hr == DXGI_ERROR_NOT_FOUND) {
+                break;
+            }
+            if (FAILED(hr) || !output) {
+                continue;
+            }
+
+            DXGI_OUTPUT_DESC desc;
+            ZeroMemory(&desc, sizeof(desc));
+            hr = output->GetDesc(&desc);
+            if (FAILED(hr)) {
+                continue;
+            }
+
+            if (!desc.AttachedToDesktop) {
+                continue;
+            }
+
+            ComPtr<IDXGIOutput1> output1;
+            hr = output.As(&output1);
+            if (FAILED(hr) || !output1) {
+                continue;
+            }
+
+            // Create D3D11 device for this adapter
+            ComPtr<ID3D11Device> device;
+            ComPtr<ID3D11DeviceContext> context;
+            D3D_FEATURE_LEVEL featureLevel;
+
+            const UINT createFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+            hr = D3D11CreateDevice(
+                adapter.Get(),
+                D3D_DRIVER_TYPE_HARDWARE,
+                nullptr,
+                createFlags,
+                featureLevels,
+                ARRAYSIZE(featureLevels),
+                D3D11_SDK_VERSION,
+                &device,
+                &featureLevel,
+                &context
+            );
+
+            if (FAILED(hr)) {
+                fprintf(stderr, "[DesktopDuplication] D3D11CreateDevice(HARDWARE) failed on adapter %u: 0x%08X, trying UNKNOWN\n", adapterIndex, hr);
+                hr = D3D11CreateDevice(
+                    adapter.Get(),
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    nullptr,
+                    createFlags,
+                    featureLevels,
+                    ARRAYSIZE(featureLevels),
+                    D3D11_SDK_VERSION,
+                    &device,
+                    &featureLevel,
+                    &context
+                );
+            }
+
+            if (FAILED(hr) || !device || !context) {
+                continue;
+            }
+
+            // Try Desktop Duplication for this output
+            ComPtr<IDXGIOutputDuplication> deskDupl;
+            hr = output1->DuplicateOutput(device.Get(), &deskDupl);
+            if (FAILED(hr) || !deskDupl) {
+                fprintf(stderr, "[DesktopDuplication] DuplicateOutput failed on adapter %u output %u: 0x%08X\n", adapterIndex, outputIndex, hr);
+                continue;
+            }
+
+            // Success: store chosen adapter/output/device/duplication
+            m_adapter = adapter;
+            m_output = output;
+            m_output1 = output1;
+            m_device = device;
+            m_context = context;
+            m_deskDupl = deskDupl;
+            m_outputDesc = desc;
+
+            m_desktopWidth = m_outputDesc.DesktopCoordinates.right - m_outputDesc.DesktopCoordinates.left;
+            m_desktopHeight = m_outputDesc.DesktopCoordinates.bottom - m_outputDesc.DesktopCoordinates.top;
+
+            fprintf(stderr, "[DesktopDuplication] Selected adapter %u output %u (%ux%u)\n",
+                adapterIndex, outputIndex, m_desktopWidth, m_desktopHeight);
+            fprintf(stderr, "[DesktopDuplication] D3D device created successfully\n");
+
+            return true;
         }
     }
 
-    fprintf(stderr, "[DesktopDuplication] D3D device created successfully\n");
-    return true;
+    fprintf(stderr, "[DesktopDuplication] No usable AttachedToDesktop output found for Desktop Duplication\n");
+    return false;
 }
 
 bool DesktopDuplication::InitializeDuplication() {
     HRESULT hr;
 
     // Create Desktop Duplication
+    if (!m_output1 || !m_device) {
+        return false;
+    }
+
     hr = m_output1->DuplicateOutput(m_device.Get(), &m_deskDupl);
     if (FAILED(hr)) {
         fprintf(stderr, "[DesktopDuplication] DuplicateOutput failed: 0x%08X\n", hr);

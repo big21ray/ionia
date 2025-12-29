@@ -225,6 +225,18 @@ void AudioEngine::MixAudio(UINT32 numFrames, std::vector<float>& output) {
     }
 }
 
+void AudioEngine::MixAudioWithMode(UINT32 numFrames, const char* mode, std::vector<float>& output) {
+    MixAudio(numFrames, output);
+
+    if (mode && std::strcmp(mode, "both") == 0) {
+        // When both sources are enabled, summing can clip (especially with gains).
+        // A simple -6 dB mix attenuation reduces crackly distortion from hard clipping.
+        for (float& sample : output) {
+            sample *= 0.5f;
+        }
+    }
+}
+
 void AudioEngine::Tick() {
     if (!m_isRunning) {
         return;
@@ -301,5 +313,46 @@ void AudioEngine::Tick() {
 
     // Advance by exactly 1024 samples
     m_framesSent += AAC_FRAME_SIZE;
+}
+
+bool AudioEngine::TryPopMixedAudioPacket(UINT32 numFrames, const char* mode, AudioPacket& outPacket) {
+    if (!m_isRunning || !mode || numFrames == 0) {
+        return false;
+    }
+
+    bool ready = false;
+    {
+        std::lock_guard<std::mutex> lock(m_bufferMutex);
+
+        if (std::strcmp(mode, "desktop") == 0) {
+            ready = (m_desktopFramesAvailable >= numFrames);
+        } else if (std::strcmp(mode, "mic") == 0) {
+            ready = (m_micFramesAvailable >= numFrames);
+        } else if (std::strcmp(mode, "both") == 0) {
+            // Recorder-friendly: avoid padding one source with silence mid-stream.
+            // Wait until BOTH sources have a full AAC block.
+            ready = (m_desktopFramesAvailable >= numFrames) && (m_micFramesAvailable >= numFrames);
+        } else {
+            // Defensive default: behave like "both".
+            ready = (m_desktopFramesAvailable >= numFrames) && (m_micFramesAvailable >= numFrames);
+        }
+
+        if (!ready) {
+            return false;
+        }
+    }
+
+    // Mix and consume exactly numFrames.
+    std::vector<float> mixedAudio;
+    MixAudioWithMode(numFrames, mode, mixedAudio);
+
+    const int64_t ptsFrames = static_cast<int64_t>(m_framesSent);
+    outPacket = m_packetManager.CreatePacket(mixedAudio.data(), numFrames, ptsFrames);
+    if (!outPacket.isValid()) {
+        return false;
+    }
+
+    m_framesSent += numFrames;
+    return true;
 }
 

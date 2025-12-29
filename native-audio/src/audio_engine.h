@@ -42,6 +42,14 @@ public:
     // This is the clock master - calculates how many frames should be sent based on elapsed time
     void Tick();
 
+    // Event-driven (recorder-friendly) audio pull:
+    // Attempts to produce exactly numFrames of mixed PCM as an AudioPacket.
+    // Returns false if there isn't enough buffered audio to produce a meaningful block.
+    //
+    // mode: "desktop", "mic", or "both". For "both", it will emit when at least one source
+    // has >= numFrames available (the other source will be padded with silence as needed).
+    bool TryPopMixedAudioPacket(UINT32 numFrames, const char* mode, AudioPacket& outPacket);
+
     // Get current PTS in frames (for encoding)
     UINT64 GetCurrentPTSFrames() const { return m_framesSent; }
 
@@ -67,6 +75,10 @@ private:
     // Mix desktop and mic audio (OBS-like: non-blocking)
     // If a source is missing, uses silence (0.0)
     void MixAudio(UINT32 numFrames, std::vector<float>& output);
+
+    // Mode-aware mixing tweaks.
+    // For "both", applies a small attenuation to reduce clipping when summing sources.
+    void MixAudioWithMode(UINT32 numFrames, const char* mode, std::vector<float>& output);
 
     // Audio buffers (thread-safe)
     std::mutex m_bufferMutex;
