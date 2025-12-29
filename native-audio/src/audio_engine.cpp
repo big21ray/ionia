@@ -7,9 +7,7 @@
 #include "ionia_logging.h"
 
 AudioEngine::AudioEngine()
-    : m_desktopFramesAvailable(0)
-    , m_micFramesAvailable(0)
-    , m_isRunning(false)
+    : m_isRunning(false)
     , m_startTimeMs(0)
     , m_framesSent(0)
     , m_micGain(1.2f)  // Increased mic gain for better voice level
@@ -53,10 +51,12 @@ bool AudioEngine::Initialize(AudioPacketCallback callback) {
     }
 
     m_callback = callback;
-    m_desktopBuffer.clear();
-    m_micBuffer.clear();
-    m_desktopFramesAvailable = 0;
-    m_micFramesAvailable = 0;
+    // Keep buffers small and bounded: enough to smooth jitter but not grow unbounded.
+    // 10 AAC frames (~213ms @ 48kHz) per source is typically plenty.
+    constexpr UINT32 kMaxBufferedFramesPerSource = 1024 * 10;
+    const size_t capacitySamples = static_cast<size_t>(kMaxBufferedFramesPerSource) * CHANNELS;
+    m_desktopBuffer.Reset(capacitySamples);
+    m_micBuffer.Reset(capacitySamples);
     m_framesSent = 0;
 
     return true;
@@ -87,10 +87,8 @@ void AudioEngine::Stop() {
 
     // Clear buffers
     std::lock_guard<std::mutex> lock(m_bufferMutex);
-    m_desktopBuffer.clear();
-    m_micBuffer.clear();
-    m_desktopFramesAvailable = 0;
-    m_micFramesAvailable = 0;
+    m_desktopBuffer.Reset(m_desktopBuffer.CapacitySamples());
+    m_micBuffer.Reset(m_micBuffer.CapacitySamples());
 }
 
 void AudioEngine::FeedAudioData(const float* data, UINT32 numFrames, const char* source) {
@@ -118,9 +116,7 @@ void AudioEngine::FeedAudioData(const float* data, UINT32 numFrames, const char*
     capture_callback_count++;
 
     if (strcmp(source, "desktop") == 0) {
-        // Append desktop audio
-        m_desktopBuffer.insert(m_desktopBuffer.end(), data, data + numSamples);
-        m_desktopFramesAvailable += numFrames;
+        m_desktopBuffer.PushSamples(data, numSamples);
         
         // ARTIFACT DEBUG: Check for gap between captures
         static UINT32 last_desktop_frames = 0;
@@ -132,9 +128,7 @@ void AudioEngine::FeedAudioData(const float* data, UINT32 numFrames, const char*
         }
         last_desktop_frames = numFrames;
     } else if (strcmp(source, "mic") == 0) {
-        // Append mic audio
-        m_micBuffer.insert(m_micBuffer.end(), data, data + numSamples);
-        m_micFramesAvailable += numFrames;
+        m_micBuffer.PushSamples(data, numSamples);
         
         // ARTIFACT DEBUG: Check for gap between captures
         static UINT32 last_mic_frames = 0;
@@ -154,44 +148,8 @@ void AudioEngine::MixAudio(UINT32 numFrames, std::vector<float>& output) {
 
     std::lock_guard<std::mutex> lock(m_bufferMutex);
 
-    // CRITICAL FIX FOR PITCH SHIFTING:
-    // When buffer accumulates more than 2*numFrames, DROP old frames to prevent pitch issues
-    // This happens when WASAPI delivers faster than we consume
-    // 
-    // Symptoms of buffer accumulation:
-    // - Pitch goes down (audio plays slower as we drain buffer)
-    // - Crackles increase (mixing old+new frames)
-    // - Sync loss (video/audio drift)
-    //
-    // Solution: Keep buffer "fresh" - if we have too much accumulated data,
-    // discard the oldest frames and use only the newest ones
-    
-    // Step 1: Drop old frames if buffer is too large
-    const UINT32 maxBufferFrames = numFrames * 3;  // Allow up to 3x buffer (safety margin)
-    
-    if (m_desktopFramesAvailable > maxBufferFrames) {
-        UINT32 framesToDrop = m_desktopFramesAvailable - numFrames;  // Keep only 1 frame worth
-        UINT32 samplesToDrop = framesToDrop * CHANNELS;
-        Ionia::LogInfof(
-            "DESKTOP BUFFER OVERFLOW: Dropping %u frames to prevent pitch issues\n",
-            framesToDrop);
-        m_desktopBuffer.erase(m_desktopBuffer.begin(), m_desktopBuffer.begin() + samplesToDrop);
-        m_desktopFramesAvailable -= framesToDrop;
-    }
-    
-    if (m_micFramesAvailable > maxBufferFrames) {
-        UINT32 framesToDrop = m_micFramesAvailable - numFrames;
-        UINT32 samplesToDrop = framesToDrop * CHANNELS;
-        Ionia::LogInfof(
-            "MIC BUFFER OVERFLOW: Dropping %u frames to prevent pitch issues\n",
-            framesToDrop);
-        m_micBuffer.erase(m_micBuffer.begin(), m_micBuffer.begin() + samplesToDrop);
-        m_micFramesAvailable -= framesToDrop;
-    }
-
-    // Step 2: Mix the audio (use what's available, pad with silence if needed)
-    const float* desktopData = m_desktopBuffer.data();
-    const float* micData = m_micBuffer.data();
+    const UINT32 desktopFramesAvailable = static_cast<UINT32>(m_desktopBuffer.SizeSamples() / CHANNELS);
+    const UINT32 micFramesAvailable = static_cast<UINT32>(m_micBuffer.SizeSamples() / CHANNELS);
 
     for (UINT32 frame = 0; frame < numFrames; frame++) {
         for (UINT32 ch = 0; ch < CHANNELS; ch++) {
@@ -200,13 +158,13 @@ void AudioEngine::MixAudio(UINT32 numFrames, std::vector<float>& output) {
             float micSample = 0.0f;
 
             // Get desktop sample if available, otherwise use silence (0)
-            if (frame < m_desktopFramesAvailable) {
-                desktopSample = desktopData[sampleIdx] * m_desktopGain;
+            if (frame < desktopFramesAvailable) {
+                desktopSample = m_desktopBuffer.GetSampleAt(sampleIdx) * m_desktopGain;
             }
 
             // Get mic sample if available, otherwise use silence (0)
-            if (frame < m_micFramesAvailable) {
-                micSample = micData[sampleIdx] * m_micGain;
+            if (frame < micFramesAvailable) {
+                micSample = m_micBuffer.GetSampleAt(sampleIdx) * m_micGain;
             }
 
             // Mix and clamp
@@ -218,19 +176,14 @@ void AudioEngine::MixAudio(UINT32 numFrames, std::vector<float>& output) {
         }
     }
 
-    // Step 3: Remove consumed frames from buffers
-    const UINT32 desktopSamplesToRemove = (std::min)(numSamples, static_cast<UINT32>(m_desktopBuffer.size()));
-    const UINT32 micSamplesToRemove = (std::min)(numSamples, static_cast<UINT32>(m_micBuffer.size()));
-
-    if (desktopSamplesToRemove > 0) {
-        m_desktopBuffer.erase(m_desktopBuffer.begin(), m_desktopBuffer.begin() + desktopSamplesToRemove);
-        m_desktopFramesAvailable -= (desktopSamplesToRemove / CHANNELS);
-    }
-
-    if (micSamplesToRemove > 0) {
-        m_micBuffer.erase(m_micBuffer.begin(), m_micBuffer.begin() + micSamplesToRemove);
-        m_micFramesAvailable -= (micSamplesToRemove / CHANNELS);
-    }
+    // Consume exactly the samples we mixed (or what's available if a source underruns).
+    const size_t numSamplesSizeT = static_cast<size_t>(numSamples);
+    const size_t desktopAvailable = m_desktopBuffer.SizeSamples();
+    const size_t micAvailable = m_micBuffer.SizeSamples();
+    const size_t desktopSamplesToRemove = (desktopAvailable < numSamplesSizeT) ? desktopAvailable : numSamplesSizeT;
+    const size_t micSamplesToRemove = (micAvailable < numSamplesSizeT) ? micAvailable : numSamplesSizeT;
+    m_desktopBuffer.PopSamples(desktopSamplesToRemove);
+    m_micBuffer.PopSamples(micSamplesToRemove);
 }
 
 void AudioEngine::MixAudioWithMode(UINT32 numFrames, const char* mode, std::vector<float>& output) {
@@ -279,15 +232,17 @@ void AudioEngine::Tick() {
     UINT32 availableFrames = 0;
     {
         std::lock_guard<std::mutex> lock(m_bufferMutex);
-        availableFrames = m_desktopFramesAvailable + m_micFramesAvailable;
+        const UINT32 desktopFrames = static_cast<UINT32>(m_desktopBuffer.SizeSamples() / CHANNELS);
+        const UINT32 micFrames = static_cast<UINT32>(m_micBuffer.SizeSamples() / CHANNELS);
+        availableFrames = desktopFrames + micFrames;
         
         // Log buffer state
         static int tick_count = 0;
         if (tick_count < 30 || tick_count % 50 == 0) {
             Ionia::LogDebugf(
                 "[AudioEngine::Tick] BLOCK MODE: desktop=%u, mic=%u, total=%u (need %u) - %s\n",
-                m_desktopFramesAvailable,
-                m_micFramesAvailable,
+                desktopFrames,
+                micFrames,
                 availableFrames,
                 AAC_FRAME_SIZE,
                 availableFrames >= AAC_FRAME_SIZE ? "READY" : "PADDING WITH SILENCE");
@@ -336,17 +291,20 @@ bool AudioEngine::TryPopMixedAudioPacket(UINT32 numFrames, const char* mode, Aud
     {
         std::lock_guard<std::mutex> lock(m_bufferMutex);
 
+        const UINT32 desktopFramesAvailable = static_cast<UINT32>(m_desktopBuffer.SizeSamples() / CHANNELS);
+        const UINT32 micFramesAvailable = static_cast<UINT32>(m_micBuffer.SizeSamples() / CHANNELS);
+
         if (std::strcmp(mode, "desktop") == 0) {
-            ready = (m_desktopFramesAvailable >= numFrames);
+            ready = (desktopFramesAvailable >= numFrames);
         } else if (std::strcmp(mode, "mic") == 0) {
-            ready = (m_micFramesAvailable >= numFrames);
+            ready = (micFramesAvailable >= numFrames);
         } else if (std::strcmp(mode, "both") == 0) {
             // Recorder-friendly: avoid padding one source with silence mid-stream.
             // Wait until BOTH sources have a full AAC block.
-            ready = (m_desktopFramesAvailable >= numFrames) && (m_micFramesAvailable >= numFrames);
+            ready = (desktopFramesAvailable >= numFrames) && (micFramesAvailable >= numFrames);
         } else {
             // Defensive default: behave like "both".
-            ready = (m_desktopFramesAvailable >= numFrames) && (m_micFramesAvailable >= numFrames);
+            ready = (desktopFramesAvailable >= numFrames) && (micFramesAvailable >= numFrames);
         }
 
         if (!ready) {

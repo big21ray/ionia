@@ -9,13 +9,23 @@ echo.
 REM Change to script directory
 cd /d "%~dp0"
 
-REM Prefer known-good Python if available
+REM Locate Python for node-gyp (required)
+set "PYTHON="
 if exist "C:\KarmineDev\anaconda3\python.exe" (
   set "PYTHON=C:\KarmineDev\anaconda3\python.exe"
+  goto :python_found
+)
+for /f "delims=" %%i in ('where python.exe 2^>nul') do (
+  set "PYTHON=%%i"
+  goto :python_found
+)
+:python_found
+if defined PYTHON (
   echo Python found: %PYTHON%
 ) else (
-  echo WARNING: Python not found at C:\KarmineDev\anaconda3\python.exe
-  echo node-gyp will use whatever Python it can find.
+  echo WARNING: Python not found on PATH.
+  echo node-gyp will fail until Python 3 is installed.
+  echo Suggested: install Python 3 from python.org or: winget install Python.Python.3.12
 )
 
 REM Visual Studio hints
@@ -52,15 +62,18 @@ if not exist "%OUTDIR%" (
   exit /b 1
 )
 
-if exist "%FFMPEG_BIN%\avcodec.dll" (
+if exist "%FFMPEG_BIN%" (
   echo Copying FFmpeg DLLs from: %FFMPEG_BIN%
-  copy /Y "%FFMPEG_BIN%\avcodec.dll" "%OUTDIR%\" >nul 2>&1
-  copy /Y "%FFMPEG_BIN%\avformat.dll" "%OUTDIR%\" >nul 2>&1
-  copy /Y "%FFMPEG_BIN%\avutil.dll" "%OUTDIR%\" >nul 2>&1
-  copy /Y "%FFMPEG_BIN%\swresample.dll" "%OUTDIR%\" >nul 2>&1
-  copy /Y "%FFMPEG_BIN%\swscale.dll" "%OUTDIR%\" >nul 2>&1
+  REM Copy both unversioned and versioned FFmpeg DLLs.
+  REM Note: `if exist` does NOT reliably match wildcards with full paths, so we
+  REM iterate resolved filenames via `for`.
+  for %%P in (avcodec avformat avutil swresample swscale avfilter avdevice libx264) do (
+    for %%G in ("%FFMPEG_BIN%\%%P*.dll") do (
+      if exist "%%~fG" copy /Y "%%~fG" "%OUTDIR%\" >nul 2>&1
+    )
+  )
 ) else (
-  echo WARNING: FFmpeg DLLs not found at %FFMPEG_BIN% (skipping copy)
+  echo WARNING: FFmpeg bin folder not found at %FFMPEG_BIN% (skipping copy)
 )
 
 echo.

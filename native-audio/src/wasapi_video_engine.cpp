@@ -6,10 +6,6 @@
 VideoEngine::VideoEngine()
     : m_frameBuffer(BUFFER_SIZE)
 {
-    // Initialize all frames in buffer
-    for (auto& frame : m_frameBuffer) {
-        frame.resize(1920 * 1080 * 4);  // Will be resized correctly in Initialize
-    }
 }
 
 VideoEngine::~VideoEngine() {
@@ -22,8 +18,26 @@ bool VideoEngine::Initialize(uint32_t fps, VideoEncoder* videoEncoder) {
         return false;
     }
 
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     m_fps = fps;
     m_videoEncoder = videoEncoder;
+
+    uint32_t w = 0, h = 0;
+    m_videoEncoder->GetDimensions(&w, &h);
+    if (w == 0 || h == 0) {
+        fprintf(stderr, "[VideoEngine] Invalid encoder dimensions: %ux%u\n", w, h);
+        return false;
+    }
+
+    m_width = w;
+    m_height = h;
+    m_frameSize = static_cast<size_t>(m_width) * static_cast<size_t>(m_height) * 4;
+
+    for (auto& frame : m_frameBuffer) {
+        frame.resize(m_frameSize);
+    }
+
     m_frameNumber = 0;
     m_framesEncoded = 0;
     m_framesDuplicated = 0;
@@ -31,12 +45,14 @@ bool VideoEngine::Initialize(uint32_t fps, VideoEncoder* videoEncoder) {
     m_bufferWritePos = 0;
     m_bufferHasFrames = false;
     m_hasLastFrame = false;
+    m_lastFrameIndex = 0;
 
     fprintf(stderr, "[VideoEngine] Initialized: %u fps, encoder=%p\n", m_fps, m_videoEncoder);
     return true;
 }
 
 void VideoEngine::Start() {
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_isRunning = true;
     m_startTime = std::chrono::high_resolution_clock::now();
     m_frameNumber = 0;
@@ -46,19 +62,21 @@ void VideoEngine::Start() {
 }
 
 void VideoEngine::Stop() {
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_isRunning = false;
     fprintf(stderr, "[VideoEngine] Stopped (encoded=%llu, duplicated=%llu)\n", 
             m_framesEncoded, m_framesDuplicated);
 }
 
 bool VideoEngine::PushFrame(const uint8_t* frameData) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_isRunning || !frameData) {
         return false;
     }
 
-    // Get frame size from encoder
-    // Assume 1920x1080 BGRA (hardcoded for now, could come from encoder)
-    const size_t frameSize = 1920 * 1080 * 4;
+    const size_t frameSize = m_frameSize;
+    if (frameSize == 0) return false;
 
     // Try to write to buffer (non-blocking)
     size_t nextWritePos = (m_bufferWritePos + 1) % BUFFER_SIZE;
@@ -72,6 +90,8 @@ bool VideoEngine::PushFrame(const uint8_t* frameData) {
 
     // Copy frame to buffer
     std::copy(frameData, frameData + frameSize, m_frameBuffer[m_bufferWritePos].begin());
+    m_lastFrameIndex = m_bufferWritePos;
+    m_hasLastFrame = true;
     m_bufferWritePos = nextWritePos;
     m_bufferHasFrames = true;
 
@@ -79,11 +99,15 @@ bool VideoEngine::PushFrame(const uint8_t* frameData) {
 }
 
 bool VideoEngine::PopFrameFromBufferInternal(std::vector<uint8_t>& outFrame) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     if (!m_bufferHasFrames || m_bufferReadPos == m_bufferWritePos) {
         return false;
     }
 
-    outFrame = m_frameBuffer[m_bufferReadPos];
+    // Zero-copy handoff: swap vectors so we don't memcpy full frames.
+    // Caller should reuse `outFrame` across ticks to avoid allocations.
+    outFrame.swap(m_frameBuffer[m_bufferReadPos]);
     m_bufferReadPos = (m_bufferReadPos + 1) % BUFFER_SIZE;
 
     // Check if buffer is now empty
@@ -130,9 +154,16 @@ bool VideoEngine::PopFrameFromBuffer(std::vector<uint8_t>& outFrame) {
 }
 
 bool VideoEngine::GetLastFrame(std::vector<uint8_t>& outFrame) const {
-    if (!m_hasLastFrame || m_lastFrame.empty()) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    if (!m_hasLastFrame || m_frameSize == 0) {
         return false;
     }
-    outFrame = m_lastFrame;
+
+    const auto& src = m_frameBuffer[m_lastFrameIndex];
+    if (outFrame.size() != src.size()) {
+        outFrame.resize(src.size());
+    }
+    std::copy(src.begin(), src.end(), outFrame.begin());
     return true;
 }

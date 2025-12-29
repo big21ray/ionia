@@ -71,10 +71,14 @@ async function testVideoAudioRecorder() {
             process.exit(1);
         }
         
-        const codecName = recorder.getCodecName();
+        let codecName = 'unknown';
+        if (typeof recorder.getCodecName === 'function') {
+            codecName = recorder.getCodecName();
+        }
+
         console.log('✅ Recorder initialized');
         console.log(`📹 Video Codec: ${codecName}`);
-        
+
         if (codecName === 'h264_mf') {
             console.error('❌ ERROR: h264_mf codec is being used, but it should be rejected in STA mode!');
             process.exit(1);
@@ -82,6 +86,8 @@ async function testVideoAudioRecorder() {
             console.log('✅ Correct codec selected: libx264 (works in STA mode)');
         } else if (codecName === 'h264_nvenc') {
             console.log('✅ Using NVENC (hardware acceleration)');
+        } else if (codecName === 'unknown') {
+            console.log('ℹ️  getCodecName not exposed on VideoAudioRecorder; relying on stderr logs for codec selection');
         }
         console.log('');
 
@@ -99,9 +105,19 @@ async function testVideoAudioRecorder() {
         
         const progressInterval = setInterval(() => {
             const elapsed = (Date.now() - startTime) / 1000;
-            const pts = recorder.getCurrentPTSSeconds();
-            const stats = recorder.getStatistics();
-            console.log(`   📊 ${elapsed.toFixed(1)}s elapsed | PTS: ${pts.toFixed(2)}s | Video Frames: ${stats.videoFramesCaptured} | Video Packets: ${stats.videoPacketsEncoded} | Audio Packets: ${stats.audioPacketsEncoded}`);
+            const pts = (typeof recorder.getCurrentPTSSeconds === 'function')
+                ? recorder.getCurrentPTSSeconds()
+                : NaN;
+            const stats = (typeof recorder.getStatistics === 'function')
+                ? recorder.getStatistics()
+                : null;
+
+            const ptsText = Number.isFinite(pts) ? `${pts.toFixed(2)}s` : 'n/a';
+            const videoFrames = stats?.videoFramesCaptured ?? 'n/a';
+            const videoPackets = stats?.videoPacketsEncoded ?? 'n/a';
+            const audioPackets = stats?.audioPacketsEncoded ?? 'n/a';
+
+            console.log(`   📊 ${elapsed.toFixed(1)}s elapsed | PTS: ${ptsText} | Video Frames: ${videoFrames} | Video Packets: ${videoPackets} | Audio Packets: ${audioPackets}`);
         }, 1000);
 
         await new Promise(resolve => setTimeout(resolve, 10000));
@@ -116,16 +132,20 @@ async function testVideoAudioRecorder() {
         }
         console.log('✅ Recording stopped\n');
 
-        const finalStats = recorder.getStatistics();
+        const finalStats = (typeof recorder.getStatistics === 'function') ? recorder.getStatistics() : {};
         console.log('📊 Final Statistics:');
         console.log(`   Video Frames Captured: ${finalStats.videoFramesCaptured}`);
         console.log(`   Video Packets Encoded: ${finalStats.videoPacketsEncoded}`);
         console.log(`   Audio Packets Encoded: ${finalStats.audioPacketsEncoded}`);
         console.log(`   Video Packets Muxed: ${finalStats.videoPacketsMuxed}`);
         console.log(`   Audio Packets Muxed: ${finalStats.audioPacketsMuxed}`);
-        console.log(`   Total Bytes: ${finalStats.totalBytes} (${(finalStats.totalBytes / 1024 / 1024).toFixed(2)} MB)\n`);
+        const totalBytes = (typeof finalStats.totalBytes === 'number') ? finalStats.totalBytes : NaN;
+        const totalBytesText = Number.isFinite(totalBytes)
+            ? `${totalBytes} (${(totalBytes / 1024 / 1024).toFixed(2)} MB)`
+            : 'n/a';
+        console.log(`   Total Bytes: ${totalBytesText}\n`);
 
-        const finalCodecName = recorder.getCodecName();
+        const finalCodecName = (typeof recorder.getCodecName === 'function') ? recorder.getCodecName() : 'unknown';
         
         console.log(`✅ Test completed! Video + Audio saved to: ${outputPath}`);
         console.log(`   Expected video frames: ~${30 * 10} (30 fps × 10 seconds)`);

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <functional>
 #include <cstdint>
+#include <algorithm>
 #include "av_packet.h"
 #include "audio_packet_manager.h"
 
@@ -68,6 +69,75 @@ public:
     static constexpr UINT16 BYTES_PER_SAMPLE = 4;
 
 private:
+    class FloatRingBuffer {
+    public:
+        void Reset(size_t capacitySamples) {
+            m_data.assign(capacitySamples, 0.0f);
+            m_capacity = capacitySamples;
+            m_read = 0;
+            m_write = 0;
+            m_size = 0;
+        }
+
+        size_t SizeSamples() const { return m_size; }
+        size_t CapacitySamples() const { return m_capacity; }
+
+        void PushSamples(const float* samples, size_t count) {
+            if (!samples || count == 0 || m_capacity == 0) return;
+
+            // If pushing more than capacity, keep only the tail.
+            if (count >= m_capacity) {
+                samples += (count - m_capacity);
+                count = m_capacity;
+                m_read = 0;
+                m_write = 0;
+                m_size = 0;
+            }
+
+            // If not enough space, drop oldest samples.
+            const size_t freeSpace = m_capacity - m_size;
+            if (count > freeSpace) {
+                const size_t drop = count - freeSpace;
+                PopSamples(drop);
+            }
+
+            size_t remaining = count;
+            while (remaining > 0) {
+                const size_t chunk = (std::min)(remaining, m_capacity - m_write);
+                std::copy(samples, samples + chunk, m_data.begin() + m_write);
+                m_write = (m_write + chunk) % m_capacity;
+                m_size += chunk;
+                samples += chunk;
+                remaining -= chunk;
+            }
+        }
+
+        float GetSampleAt(size_t offsetFromRead) const {
+            if (offsetFromRead >= m_size || m_capacity == 0) return 0.0f;
+            const size_t idx = (m_read + offsetFromRead) % m_capacity;
+            return m_data[idx];
+        }
+
+        void PopSamples(size_t count) {
+            if (count == 0 || m_size == 0 || m_capacity == 0) return;
+            if (count >= m_size) {
+                m_read = 0;
+                m_write = 0;
+                m_size = 0;
+                return;
+            }
+            m_read = (m_read + count) % m_capacity;
+            m_size -= count;
+        }
+
+    private:
+        std::vector<float> m_data;
+        size_t m_capacity = 0;
+        size_t m_read = 0;
+        size_t m_write = 0;
+        size_t m_size = 0;
+    };
+
     // Monotonic clock (OBS-like) - returns milliseconds since an arbitrary point
     // Uses QueryPerformanceCounter for high-resolution, monotonic timing
     UINT64 GetMonotonicTimeMs() const;
@@ -82,10 +152,8 @@ private:
 
     // Audio buffers (thread-safe)
     std::mutex m_bufferMutex;
-    std::vector<float> m_desktopBuffer;  // Interleaved stereo: [L0, R0, L1, R1, ...]
-    std::vector<float> m_micBuffer;       // Interleaved stereo: [L0, R0, L1, R1, ...]
-    UINT32 m_desktopFramesAvailable;
-    UINT32 m_micFramesAvailable;
+    FloatRingBuffer m_desktopBuffer;  // Interleaved stereo samples
+    FloatRingBuffer m_micBuffer;      // Interleaved stereo samples
 
     // Audio Engine state
     std::atomic<bool> m_isRunning;

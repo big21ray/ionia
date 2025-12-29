@@ -101,7 +101,8 @@ void AudioEngineAddon::OnAudioPacket(const AudioPacket& packet) {
         return;
     }
 
-    auto status = m_tsfn.BlockingCall(
+    // Non-blocking call: if JS is slow and the queue is full, drop this packet.
+    auto status = m_tsfn.NonBlockingCall(
         packetData,
         [](Napi::Env env, Napi::Function jsCallback, PacketData* packetData) {
             // Create Buffer from packet data (PCM float32)
@@ -148,7 +149,7 @@ Napi::Value AudioEngineAddon::Initialize(const Napi::CallbackInfo& info) {
         env,
         callback,
         "Audio Engine Output",
-        0,  // Unlimited queue
+        8,  // Bounded queue to avoid unbounded RAM growth
         1   // Initial thread count
     );
     

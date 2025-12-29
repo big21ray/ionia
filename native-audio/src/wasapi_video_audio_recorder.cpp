@@ -36,6 +36,8 @@ private:
     Napi::Value Start(const Napi::CallbackInfo& info);
     Napi::Value Stop(const Napi::CallbackInfo& info);
     Napi::Value IsRunning(const Napi::CallbackInfo& info);
+    Napi::Value GetCodecName(const Napi::CallbackInfo& info);
+    Napi::Value GetCurrentPTSSeconds(const Napi::CallbackInfo& info);
     Napi::Value GetStatistics(const Napi::CallbackInfo& info);
 
     void CaptureThread();
@@ -87,6 +89,8 @@ Napi::Object VideoAudioRecorderAddon::Init(Napi::Env env, Napi::Object exports) 
             InstanceMethod("start", &VideoAudioRecorderAddon::Start),
             InstanceMethod("stop", &VideoAudioRecorderAddon::Stop),
             InstanceMethod("isRunning", &VideoAudioRecorderAddon::IsRunning),
+            InstanceMethod("getCodecName", &VideoAudioRecorderAddon::GetCodecName),
+            InstanceMethod("getCurrentPTSSeconds", &VideoAudioRecorderAddon::GetCurrentPTSSeconds),
             InstanceMethod("getStatistics", &VideoAudioRecorderAddon::GetStatistics),
         })
     );
@@ -295,16 +299,19 @@ void VideoAudioRecorderAddon::CaptureThread() {
         int64_t ts;
         if (m_desktop->CaptureFrame(frame.data(), &w, &h, &ts)) {
             m_videoEngine->PushFrame(frame.data());
+        } else {
+            // Avoid 100% CPU when no new frame is available.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
 }
 
 void VideoAudioRecorderAddon::VideoTickThread() {
+    std::vector<uint8_t> frame(m_width * m_height * 4);
+
     while (!m_stop) {
         if (m_videoEngine->GetFrameNumber() <
             m_videoEngine->GetExpectedFrameNumber()) {
-
-            std::vector<uint8_t> frame;
             bool hasFrame = m_videoEngine->PopFrameFromBuffer(frame);
             if (!hasFrame) {
                 // Duplicate last frame if capture lags.
@@ -319,6 +326,9 @@ void VideoAudioRecorderAddon::VideoTickThread() {
                 }
             }
             m_videoEngine->AdvanceFrameNumber();
+        } else {
+            // Sleep a little to avoid a tight spin when we're ahead of schedule.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
 }
@@ -327,8 +337,48 @@ Napi::Value VideoAudioRecorderAddon::IsRunning(const Napi::CallbackInfo& info) {
     return Napi::Boolean::New(info.Env(), m_running);
 }
 
+Napi::Value VideoAudioRecorderAddon::GetCodecName(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!m_videoEncoder) {
+        return Napi::String::New(env, "none");
+    }
+    return Napi::String::New(env, m_videoEncoder->GetCodecName());
+}
+
+Napi::Value VideoAudioRecorderAddon::GetCurrentPTSSeconds(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    if (!m_videoEngine) {
+        return Napi::Number::New(env, 0.0);
+    }
+    return Napi::Number::New(env, m_videoEngine->GetPTSSeconds());
+}
+
 Napi::Value VideoAudioRecorderAddon::GetStatistics(const Napi::CallbackInfo& info) {
-    return Napi::Object::New(info.Env());
+    Napi::Env env = info.Env();
+    Napi::Object stats = Napi::Object::New(env);
+
+    uint64_t videoFrames = 0;
+    if (m_videoEngine) {
+        videoFrames = m_videoEngine->GetFrameNumber();
+    }
+
+    uint64_t videoPackets = 0;
+    uint64_t audioPackets = 0;
+    uint64_t totalBytes = 0;
+    if (m_videoMuxer) {
+        videoPackets = m_videoMuxer->GetVideoPackets();
+        audioPackets = m_videoMuxer->GetAudioPackets();
+        totalBytes = m_videoMuxer->GetTotalBytes();
+    }
+
+    stats.Set("videoFramesCaptured", Napi::Number::New(env, static_cast<double>(videoFrames)));
+    stats.Set("videoPacketsEncoded", Napi::Number::New(env, static_cast<double>(videoPackets)));
+    stats.Set("audioPacketsEncoded", Napi::Number::New(env, static_cast<double>(audioPackets)));
+    stats.Set("videoPacketsMuxed", Napi::Number::New(env, static_cast<double>(videoPackets)));
+    stats.Set("audioPacketsMuxed", Napi::Number::New(env, static_cast<double>(audioPackets)));
+    stats.Set("totalBytes", Napi::Number::New(env, static_cast<double>(totalBytes)));
+
+    return stats;
 }
 
 void VideoAudioRecorderAddon::Cleanup() {

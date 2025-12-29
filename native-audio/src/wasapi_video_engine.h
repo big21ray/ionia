@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include <mutex>
 
 class VideoEncoder;
 
@@ -102,6 +103,8 @@ public:
     uint64_t GetFramesDuplicated() const { return m_framesDuplicated; }
 
 private:
+    mutable std::mutex m_mutex;
+
     // Ring buffer for captured frames
     // Capture thread pushes here (best effort)
     // Tick thread pops from here
@@ -111,8 +114,12 @@ private:
     size_t m_bufferWritePos = 0;
     bool m_bufferHasFrames = false;
 
-    // Last captured frame (for duplication on lag)
-    std::vector<uint8_t> m_lastFrame;
+    uint32_t m_width = 0;
+    uint32_t m_height = 0;
+    size_t m_frameSize = 0;
+
+    // Index of the most recently written frame slot (for duplication on lag)
+    size_t m_lastFrameIndex = 0;
     bool m_hasLastFrame = false;
 
     // Clock master state

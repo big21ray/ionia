@@ -12,13 +12,23 @@ echo Building for BOTH Node.js and Electron
 echo ========================================
 echo.
 
-REM Set Python path (if available)
+REM Locate Python for node-gyp (required)
+set "PYTHON="
 if exist "C:\KarmineDev\anaconda3\python.exe" (
-    set PYTHON=C:\KarmineDev\anaconda3\python.exe
+    set "PYTHON=C:\KarmineDev\anaconda3\python.exe"
+    goto :python_found
+)
+for /f "delims=" %%i in ('where python.exe 2^>nul') do (
+    set "PYTHON=%%i"
+    goto :python_found
+)
+:python_found
+if defined PYTHON (
     echo Python found: %PYTHON%
 ) else (
-    echo WARNING: Python not found at C:\KarmineDev\anaconda3\python.exe
-    echo node-gyp may fail if Python is required
+    echo WARNING: Python not found on PATH.
+    echo node-gyp will fail until Python 3 is installed.
+    echo Suggested: install Python 3 from python.org or: winget install Python.Python.3.12
 )
 
 REM Set node-gyp variables
@@ -199,6 +209,15 @@ if exist "%FFMPEG_BIN%\avcodec.dll" (
     goto :copy_from_source
 )
 
+REM vcpkg may only ship versioned DLLs (e.g. avcodec-61.dll)
+for %%G in ("%FFMPEG_BIN%\avcodec-*.dll") do (
+    if exist "%%~fG" (
+        set FFMPEG_SOURCE=%FFMPEG_BIN%
+        set FOUND=1
+        goto :copy_from_source
+    )
+)
+
 REM Check vcpkg buildtrees (debug build) - DLLs are in separate subdirectories
 if exist "C:\vcpkg\buildtrees\ffmpeg\x64-windows-dbg\libavcodec\avcodec.dll" (
     echo WARNING: Found debug DLLs in buildtrees (not recommended for production)
@@ -247,48 +266,32 @@ if %FOUND% == 0 (
 :copy_from_source
 echo Found FFmpeg DLLs at: %FFMPEG_SOURCE%
 echo Copying DLLs to %BUILD_OUTPUT%...
-copy /Y "%FFMPEG_SOURCE%\avcodec.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Failed to copy avcodec.dll
-) else (
-    echo [OK] avcodec.dll
-)
+if not exist "%BUILD_OUTPUT%" mkdir "%BUILD_OUTPUT%"
 
-copy /Y "%FFMPEG_SOURCE%\avformat.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Failed to copy avformat.dll
-) else (
-    echo [OK] avformat.dll
-)
-
-copy /Y "%FFMPEG_SOURCE%\avutil.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Failed to copy avutil.dll
-) else (
-    echo [OK] avutil.dll
-)
-
-copy /Y "%FFMPEG_SOURCE%\swresample.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-if errorlevel 1 (
-    echo ERROR: Failed to copy swresample.dll
-) else (
-    echo [OK] swresample.dll
+REM Copy both unversioned and versioned FFmpeg DLLs.
+REM Note: `if exist` does NOT reliably match wildcards with full paths, so we
+REM iterate resolved filenames via `for`.
+for %%P in (avcodec avformat avutil swresample swscale avfilter avdevice) do (
+    for %%G in ("%FFMPEG_SOURCE%\%%P*.dll") do (
+        if exist "%%~fG" (
+            copy /Y "%%~fG" "%BUILD_OUTPUT%\" >nul 2>&1
+            if not errorlevel 1 (
+                echo [OK] %%~nxG
+            ) else (
+                echo WARNING: Failed to copy %%~nxG
+            )
+        )
+    )
 )
 
 REM Copy libx264 DLL (dependency of avcodec.dll)
-if exist "%FFMPEG_SOURCE%\libx264-164.dll" (
-    copy /Y "%FFMPEG_SOURCE%\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-    if errorlevel 1 (
-        echo WARNING: Failed to copy libx264-164.dll
-    ) else (
-        echo [OK] libx264-164.dll
-    )
-) else (
-    REM Try to find libx264 in vcpkg installed
-    if exist "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" (
-        copy /Y "C:\vcpkg\installed\x64-windows\bin\libx264-164.dll" "%BUILD_OUTPUT%\" >nul 2>&1
-        if not errorlevel 1 (
-            echo [OK] libx264-164.dll (from vcpkg installed)
+for %%X in ("%FFMPEG_SOURCE%\libx264-*.dll" "C:\vcpkg\installed\x64-windows\bin\libx264-*.dll") do (
+    for %%f in (%%X) do (
+        if exist "%%~ff" (
+            copy /Y "%%~ff" "%BUILD_OUTPUT%\" >nul 2>&1
+            if not errorlevel 1 (
+                echo [OK] %%~nxf
+            )
         )
     )
 )
@@ -358,28 +361,45 @@ REM ========================================
 :verify_dlls
 echo.
 echo Verifying copied DLLs...
-if exist "%BUILD_OUTPUT%\avcodec.dll" (
-    if exist "%BUILD_OUTPUT%\avformat.dll" (
-        if exist "%BUILD_OUTPUT%\avutil.dll" (
-            if exist "%BUILD_OUTPUT%\swresample.dll" (
-                echo.
-                echo ========================================
-                echo ✅ All DLLs copied successfully!
-                echo ========================================
-                echo.
-                echo DLLs in %BUILD_OUTPUT%:
-                dir /B "%BUILD_OUTPUT%\*.dll"
-                echo.
-            ) else (
-                echo ERROR: swresample.dll missing
-            )
-        ) else (
-            echo ERROR: avutil.dll missing
-        )
-    ) else (
-        echo ERROR: avformat.dll missing
-    )
-) else (
-    echo ERROR: avcodec.dll missing
+set "OK_AVCODEC=0"
+for %%G in ("%BUILD_OUTPUT%\avcodec*.dll") do if exist "%%~fG" set "OK_AVCODEC=1"
+
+set "OK_AVFORMAT=0"
+for %%G in ("%BUILD_OUTPUT%\avformat*.dll") do if exist "%%~fG" set "OK_AVFORMAT=1"
+
+set "OK_AVUTIL=0"
+for %%G in ("%BUILD_OUTPUT%\avutil*.dll") do if exist "%%~fG" set "OK_AVUTIL=1"
+
+set "OK_SWRESAMPLE=0"
+for %%G in ("%BUILD_OUTPUT%\swresample*.dll") do if exist "%%~fG" set "OK_SWRESAMPLE=1"
+
+set "OK_SWSCALE=0"
+for %%G in ("%BUILD_OUTPUT%\swscale*.dll") do if exist "%%~fG" set "OK_SWSCALE=1"
+
+if "%OK_AVCODEC%"=="0" (
+    echo ERROR: avcodec DLL missing
+    goto :eof
 )
+if "%OK_AVFORMAT%"=="0" (
+    echo ERROR: avformat DLL missing
+    goto :eof
+)
+if "%OK_AVUTIL%"=="0" (
+    echo ERROR: avutil DLL missing
+    goto :eof
+)
+if "%OK_SWRESAMPLE%"=="0" (
+    echo ERROR: swresample DLL missing
+    goto :eof
+)
+
+echo.
+echo ========================================
+echo ✅ Core FFmpeg DLLs present
+echo ========================================
+if "%OK_SWSCALE%"=="0" echo WARNING: swscale DLL missing (conversion may fail)
+echo.
+echo DLLs in %BUILD_OUTPUT%:
+dir /B "%BUILD_OUTPUT%\*.dll"
+echo.
 goto :eof
