@@ -52,18 +52,22 @@ This document tracks current features, planned features, and features under cons
 - [x] COM threading mode detection (STA/MTA)
 - [x] Automatic codec selection (rejects h264_mf in STA mode)
 
+### Livestream / Streaming Features
+- [x] **Livestream option (RTMP)**
+  - Stream to RTMP servers (YouTube, Twitch, etc.)
+  - Start/stop streaming from the Electron app
+
 ## 🚧 Next Steps (Priority)
 
 ### Recording Enhancements
-- [ ] **Livestream option** - Add a stream button in the Electron app
-  - Stream to RTMP server (Twitch, YouTube, etc.)
-  - Configure stream URL and key
-  - Stream quality settings
-  
 - [ ] **Window recording** - Record video only from a specific window
   - Window selection UI
   - Capture specific application window instead of full screen
   - Window border detection and cropping
+
+- [ ] **Simultaneous record + stream**
+  - Record MP4 locally while streaming RTMP
+  - Shared capture/encode pipeline (avoid double-capture if possible)
 
 - [ ] **Build & Distribution** - Compile to installable .exe
   - Electron Builder configuration
