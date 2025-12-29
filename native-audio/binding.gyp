@@ -3,6 +3,7 @@
     {
       "target_name": "wasapi_video_audio",
       "sources": [
+        "src/ionia_logging.cpp",
         "src/wasapi_capture.cpp",
         "src/audio_capture.cpp",
         "src/audio_engine.cpp",

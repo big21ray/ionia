@@ -4,6 +4,8 @@
 #include <libavutil/rational.h>
 #include <algorithm>
 
+#include "ionia_logging.h"
+
 StreamBuffer::StreamBuffer(size_t maxSize, int64_t maxLatencyMs)
     : m_maxSize(maxSize)
     , m_maxLatencyMs(maxLatencyMs)
@@ -104,17 +106,21 @@ bool StreamBuffer::AddPacket(AVPacket* packet) {
         
         static int check_count = 0;
         if (check_count < 10 || check_count % 100 == 0) {
-                    fprintf(stderr, "[StreamBuffer] AddPacket: size=%zu, latency=%lld ms (max=%lld), front_dts_us=%lld, back_dts_us=%lld\n",
-                    m_packets.size(), latency, m_maxLatencyMs, 
-                        m_packets.front().dtsUs, m_packets.back().dtsUs);
-            fflush(stderr);
+            Ionia::LogDebugf(
+                "[StreamBuffer] AddPacket: size=%zu, latency=%lld ms (max=%lld), front_dts_us=%lld, back_dts_us=%lld\n",
+                m_packets.size(),
+                latency,
+                m_maxLatencyMs,
+                m_packets.front().dtsUs,
+                m_packets.back().dtsUs);
         }
         check_count++;
         
         if (latency > m_maxLatencyMs) {
-            fprintf(stderr, "[StreamBuffer] ⚠️ LATENCY TOO HIGH: %lld > %lld, trying to drop video P-frame\n",
-                    latency, m_maxLatencyMs);
-            fflush(stderr);
+            Ionia::LogInfof(
+                "[StreamBuffer] LATENCY TOO HIGH: %lld > %lld, trying to drop video P-frame\n",
+                latency,
+                m_maxLatencyMs);
             
             // Latency too high - drop video P-frame instead if possible
             for (auto it = m_packets.begin(); it != m_packets.end(); ++it) {
@@ -131,8 +137,7 @@ bool StreamBuffer::AddPacket(AVPacket* packet) {
             if (!m_packets.empty()) {
                 latency = GetDtsLatencyMs();
                 if (latency > m_maxLatencyMs) {
-                    fprintf(stderr, "[StreamBuffer] ⚠️ STILL TOO LATE after drop, refusing packet\n");
-                    fflush(stderr);
+                    Ionia::LogInfof("[StreamBuffer] STILL TOO LATE after drop, refusing packet\n");
                     av_packet_free(&packet);
                     m_packetsDropped++;
                     return false;
@@ -172,9 +177,10 @@ AVPacket* StreamBuffer::GetNextPacket() {
     // Log buffer state
     static int send_count = 0;
     if (send_count < 10 || send_count % 100 == 0) {
-        fprintf(stderr, "[StreamBuffer] GetNextPacket: sent_dts_us=%lld, remaining=%zu\n",
-            qp.dtsUs, m_packets.size());
-        fflush(stderr);
+        Ionia::LogDebugf(
+            "[StreamBuffer] GetNextPacket: sent_dts_us=%lld, remaining=%zu\n",
+            qp.dtsUs,
+            m_packets.size());
     }
     send_count++;
     

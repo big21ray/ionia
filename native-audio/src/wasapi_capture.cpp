@@ -9,6 +9,8 @@
 #include <cstring>
 #include <string>
 
+#include "ionia_logging.h"
+
 // Forward declaration for AudioEngine addon
 extern Napi::Object AudioEngineAddon_Init(Napi::Env env, Napi::Object exports);
 extern Napi::Object AudioEngineEncoderAddon_Init(Napi::Env env, Napi::Object exports);
@@ -270,32 +272,45 @@ Napi::Value InitializeCOMInSTAMode(const Napi::CallbackInfo& info) {
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     
     if (hr == S_OK) {
-        fprintf(stderr, "[COM] Successfully initialized COM in STA mode (for testing)\n");
-        fprintf(stderr, "[COM] COM will remain in STA mode for this thread/process\n");
+        Ionia::LogInfof("[COM] Successfully initialized COM in STA mode (for testing)\n");
+        Ionia::LogInfof("[COM] COM will remain in STA mode for this thread/process\n");
         return Napi::Boolean::New(env, true);
     } else if (hr == S_FALSE) {
         // COM was already initialized - check if it's in STA mode
-        fprintf(stderr, "[COM] COM already initialized - checking mode...\n");
+        Ionia::LogInfof("[COM] COM already initialized - checking mode...\n");
         // Try to initialize in MTA mode to see if we get RPC_E_CHANGED_MODE
         HRESULT testHr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
         if (testHr == RPC_E_CHANGED_MODE) {
-            fprintf(stderr, "[COM] COM is already in STA mode (good!)\n");
+            Ionia::LogInfof("[COM] COM is already in STA mode (good!)\n");
             return Napi::Boolean::New(env, true);
         } else {
             if (testHr == S_OK) {
                 CoUninitialize();  // Clean up test initialization
             }
-            fprintf(stderr, "[COM] COM is NOT in STA mode (may be in MTA mode)\n");
+            Ionia::LogInfof("[COM] COM is NOT in STA mode (may be in MTA mode)\n");
             return Napi::Boolean::New(env, false);
         }
     } else if (hr == RPC_E_CHANGED_MODE) {
-        fprintf(stderr, "[COM] COM already initialized in different mode (MTA)\n");
-        fprintf(stderr, "[COM] Cannot change to STA mode - test will not work correctly\n");
+        Ionia::LogInfof("[COM] COM already initialized in different mode (MTA)\n");
+        Ionia::LogInfof("[COM] Cannot change to STA mode - test will not work correctly\n");
         return Napi::Boolean::New(env, false);
     } else {
-        fprintf(stderr, "[COM] Failed to initialize COM in STA mode: 0x%08X\n", hr);
+        Ionia::LogErrorf("[COM] Failed to initialize COM in STA mode: 0x%08X\n", hr);
         return Napi::Boolean::New(env, false);
     }
+}
+
+Napi::Value SetDebugLogging(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+
+    if (info.Length() < 1 || !info[0].IsBoolean()) {
+        Napi::TypeError::New(env, "Expected boolean").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+
+    bool enabled = info[0].As<Napi::Boolean>().Value();
+    Ionia::SetDebugLoggingEnabled(enabled);
+    return env.Undefined();
 }
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
@@ -309,6 +324,9 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     // Add utility functions for testing COM STA mode
     exports.Set("initializeCOMInSTAMode", Napi::Function::New(env, InitializeCOMInSTAMode));
     exports.Set("checkCOMMode", Napi::Function::New(env, CheckCOMMode));
+
+    // Debug logging toggle (native side)
+    exports.Set("setDebugLogging", Napi::Function::New(env, SetDebugLogging));
     
     return exports;
 }

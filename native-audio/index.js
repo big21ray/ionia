@@ -54,6 +54,8 @@ module.exports = {
   VideoRecorder: nativeModule.VideoRecorder || null,  // May not be available if not compiled
   VideoAudioRecorder: nativeModule.VideoAudioRecorder || null,  // May not be available if not compiled
   VideoAudioStreamer: nativeModule.VideoAudioStreamer || null,  // May not be available if not compiled
+  // Logging
+  setDebugLogging: nativeModule.setDebugLogging || null,
   // Utility functions for testing COM mode
   initializeCOMInSTAMode: nativeModule.initializeCOMInSTAMode || null,
   checkCOMMode: nativeModule.checkCOMMode || null

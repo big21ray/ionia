@@ -23,6 +23,16 @@
 #include <cstdio>
 #include <fstream>
 
+#include "ionia_logging.h"
+
+// This file contains a lot of thread/loop diagnostics.
+// Route those through the debug logger so default runs are quiet.
+#define IONIA_STREAMER_LOGF(...) Ionia::LogDebugf(__VA_ARGS__)
+
+// This file historically called fflush() after extremely verbose logs (even inside tight loops).
+// Once logs are gated, those fflush() calls become pure overhead, so disable them here.
+#define fflush(...) ((void)0)
+
 /* =========================================================
    VideoAudioStreamerAddon
    ========================================================= */
@@ -206,7 +216,7 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
 
     m_desktop = std::make_unique<DesktopDuplication>();
     if (!m_desktop->Initialize()) {
-        fprintf(stderr, "[Initialize] DesktopDuplication failed\n");
+        IONIA_STREAMER_LOGF("[Initialize] DesktopDuplication failed\n");
         return Napi::Boolean::New(env, false);
     }
 
@@ -215,13 +225,13 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
     m_videoEncoder = std::make_unique<VideoEncoder>();
     if (!m_videoEncoder->Initialize(m_width, m_height, m_fps,
                                     m_videoBitrate, m_useNvenc, true)) {
-        fprintf(stderr, "[Initialize] VideoEncoder failed\n");
+        IONIA_STREAMER_LOGF("[Initialize] VideoEncoder failed\n");
         return Napi::Boolean::New(env, false);
     }
 
     m_videoEngine = std::make_unique<VideoEngine>();
     if (!m_videoEngine->Initialize(m_fps, m_videoEncoder.get())) {
-        fprintf(stderr, "[Initialize] VideoEngine failed\n");
+        IONIA_STREAMER_LOGF("[Initialize] VideoEngine failed\n");
         return Napi::Boolean::New(env, false);
     }
 
@@ -231,7 +241,7 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
 
     if (!m_streamMuxer->Initialize(m_rtmpUrl, m_videoEncoder.get(),
                                    AudioEngine::SAMPLE_RATE, AudioEngine::CHANNELS, m_audioBitrate)) {
-        fprintf(stderr, "[Initialize] StreamMuxer failed\n");
+        IONIA_STREAMER_LOGF("[Initialize] StreamMuxer failed\n");
         return Napi::Boolean::New(env, false);
     }
 
@@ -248,22 +258,28 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
     m_audioEncoder->Initialize(AudioEngine::SAMPLE_RATE, AudioEngine::CHANNELS, m_audioBitrate);
 
     // DIAGNOSTIC: Log audio sample rate chain (AFTER all components initialized)
-    fprintf(stdout, "\n=== AUDIO SAMPLE RATE CHAIN ===\n");
-    fprintf(stdout, "AudioEngine::SAMPLE_RATE = %d\n", AudioEngine::SAMPLE_RATE);
-    fprintf(stdout, "AudioEngine::CHANNELS = %d\n", AudioEngine::CHANNELS);
-    AVStream* audioStream = m_streamMuxer->GetAudioStream();
-    fprintf(stdout, "Stream time_base.num = %d\n", audioStream ? audioStream->time_base.num : -1);
-    fprintf(stdout, "Stream time_base.den = %d (CRITICAL: should equal sample rate 48000)\n", audioStream ? audioStream->time_base.den : -1);
-    fprintf(stdout, "AudioEncoder sample_rate = %d\n", m_audioEncoder ? m_audioEncoder->GetSampleRate() : -1);
-    fprintf(stdout, "================================\n\n");
-    fflush(stdout);
+    {
+        AVStream* audioStream = m_streamMuxer->GetAudioStream();
+        IONIA_STREAMER_LOGF("\n=== AUDIO SAMPLE RATE CHAIN ===\n");
+        IONIA_STREAMER_LOGF("AudioEngine::SAMPLE_RATE = %d\n", AudioEngine::SAMPLE_RATE);
+        IONIA_STREAMER_LOGF("AudioEngine::CHANNELS = %d\n", AudioEngine::CHANNELS);
+        IONIA_STREAMER_LOGF("Stream time_base.num = %d\n", audioStream ? audioStream->time_base.num : -1);
+        IONIA_STREAMER_LOGF(
+            "Stream time_base.den = %d (CRITICAL: should equal sample rate 48000)\n",
+            audioStream ? audioStream->time_base.den : -1);
+        IONIA_STREAMER_LOGF("AudioEncoder sample_rate = %d\n", m_audioEncoder ? m_audioEncoder->GetSampleRate() : -1);
+        IONIA_STREAMER_LOGF("================================\n\n");
+    }
 
     // Initialize AudioEngine with callback that encodes audio
     m_audioEngine->Initialize([this](const AudioPacket& p) {
+        const bool debug = Ionia::IsDebugLoggingEnabled();
         if (!m_audioEncoder || !m_streamMuxer || p.data.empty()) {
-            fprintf(stderr, "[AudioCallback] Null check failed: encoder=%p, muxer=%p, dataSize=%zu\n", 
-                    m_audioEncoder.get(), m_streamMuxer.get(), p.data.size());
-            fflush(stderr);
+            IONIA_STREAMER_LOGF(
+                "[AudioCallback] Null check failed: encoder=%p, muxer=%p, dataSize=%zu\n",
+                m_audioEncoder.get(),
+                m_streamMuxer.get(),
+                p.data.size());
             return;
         }
         
@@ -271,18 +287,23 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
         m_audioFramesReceived.fetch_add(p.duration);
         
         try {
-            fprintf(stderr, "[AudioCallback] Encoding %llu frames (total received: %llu)...\n", 
-                    static_cast<uint64_t>(p.duration), m_audioFramesReceived.load());
-            fflush(stderr);
+            if (debug) {
+                IONIA_STREAMER_LOGF(
+                    "[AudioCallback] Encoding %llu frames (total received: %llu)...\n",
+                    static_cast<uint64_t>(p.duration),
+                    m_audioFramesReceived.load());
+            }
             
             // CRITICAL VALIDATION: AAC LC requires exactly 1024 samples per frame
             // Variable frame sizes cause crackles, pitch shift, and jitter
             if (p.duration != 1024) {
-                fprintf(stderr, "[AudioCallback] ❌ AUDIO FRAME SIZE ERROR: got %llu samples, expected 1024\n",
+                static std::atomic<bool> s_loggedBadFrameSize{false};
+                if (!s_loggedBadFrameSize.exchange(true)) {
+                    Ionia::LogErrorf(
+                        "[AudioCallback] AUDIO FRAME SIZE ERROR: got %llu samples, expected 1024\n",
                         static_cast<uint64_t>(p.duration));
-                fprintf(stderr, "[AudioCallback] ❌ This frame size mismatch WILL cause audible artifacts\n");
-                fprintf(stderr, "[AudioCallback] ❌ AAC encoder assumes fixed 1024-sample frames\n");
-                fflush(stderr);
+                    Ionia::LogErrorf("[AudioCallback] AAC encoder assumes fixed 1024-sample frames\n");
+                }
                 // Continue anyway (don't drop), but this explains crackling
             }
             
@@ -294,26 +315,25 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
             // Track encoded frames
             m_audioFramesEncoded.fetch_add(p.duration);
             
-            fprintf(stderr, "[AudioCallback] Got %zu encoded packets (total frames encoded: %llu)\n", 
-                    encoded.size(), m_audioFramesEncoded.load());
-            fflush(stderr);
-            
-            fprintf(stderr, "[AudioCallback] Got %zu encoded packets (total frames encoded: %llu)\n", 
-                    encoded.size(), m_audioFramesEncoded.load());
-            fflush(stderr);
+                if (debug) {
+                IONIA_STREAMER_LOGF(
+                    "[AudioCallback] Got %zu encoded packets (total frames encoded: %llu)\n",
+                    encoded.size(),
+                    m_audioFramesEncoded.load());
+                }
             
             // ============ DIAGNOSTIC 1: Record raw AAC to file ============
             static std::ofstream aac_debug_file;
             static bool aac_file_opened = false;
-            if (!aac_file_opened) {
-                aac_debug_file.open("C:\\Users\\Karmine Corp\\Documents\\Ionia\\native-audio\\debug_audio.aac", std::ios::binary);
+            if (debug && !aac_file_opened) {
+                aac_debug_file.open(
+                    "C:\\Users\\Karmine Corp\\Documents\\Ionia\\native-audio\\debug_audio.aac",
+                    std::ios::binary);
                 if (aac_debug_file.is_open()) {
-                    fprintf(stderr, "[AudioCallback] ✅ AAC debug file opened for recording\n");
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF("[AudioCallback] AAC debug file opened for recording\n");
                     aac_file_opened = true;
                 } else {
-                    fprintf(stderr, "[AudioCallback] ❌ Failed to open AAC debug file\n");
-                    fflush(stderr);
+                    Ionia::LogErrorf("[AudioCallback] Failed to open AAC debug file\n");
                 }
             }
             
@@ -330,15 +350,17 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
                     int64_t delta_ms = (last_packet_time_ns > 0) ? (now_ns - last_packet_time_ns) / 1000000 : 0;
                     last_packet_time_ns = now_ns;
                     
-                    if (packet_count % 10 == 0) {
-                        fprintf(stderr, "[AudioCallback] PKT#%d: size=%zu bytes, delta=%lldms (expect ~21ms)\n", 
-                                packet_count, pkt.size(), delta_ms);
-                        fflush(stderr);
+                    if (debug && packet_count % 10 == 0) {
+                        IONIA_STREAMER_LOGF(
+                            "[AudioCallback] PKT#%d: size=%zu bytes, delta=%lldms (expect ~21ms)\n",
+                            packet_count,
+                            pkt.size(),
+                            delta_ms);
                     }
                     packet_count++;
                     
                     // Write to AAC file with ADTS header (for VLC playability)
-                    if (aac_debug_file.is_open()) {
+                    if (debug && aac_debug_file.is_open()) {
                         // ADTS header for AAC-LC, 48kHz, stereo
                         // Sync word (0xFFF), profile (0=LC), sample rate (3=48kHz), channels (2=stereo)
                         uint16_t frame_size = static_cast<uint16_t>(pkt.data.size() + 7);  // +7 for ADTS header
@@ -357,62 +379,67 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
                         aac_debug_file.write(reinterpret_cast<const char*>(pkt.data.data()), pkt.data.size());
                         aac_debug_file.flush();
                     }
-                    
-                    fprintf(stderr, "[AudioCallback] Writing packet %zu/%zu\n", i, encoded.size());
-                    fflush(stderr);
+
+                    if (debug) {
+                        IONIA_STREAMER_LOGF(
+                            "[AudioCallback] Writing packet %zu/%zu\n",
+                            i,
+                            encoded.size());
+                    }
                     
                     if (!m_streamMuxer) {
-                        fprintf(stderr, "[AudioCallback] Packet %zu: muxer is NULL\n", i);
-                        fflush(stderr);
+                        Ionia::LogErrorf("[AudioCallback] Packet %zu: muxer is NULL\n", i);
                         break;
                     }
                     
                     bool written = m_streamMuxer->WriteAudioPacket(pkt);
                     
                     // ============ DIAGNOSTIC 3: Packet write failures (network drops) ============
-                    if (!written) {
-                        fprintf(stderr, "[AudioCallback] ❌ PACKET DROP: Packet %zu NOT written\n", i);
-                        fflush(stderr);
-                    } else {
-                        fprintf(stderr, "[AudioCallback] ✅ Packet %zu write success\n", i);
-                        fflush(stderr);
+                    if (debug) {
+                        if (!written) {
+                            IONIA_STREAMER_LOGF("[AudioCallback] PACKET DROP: Packet %zu NOT written\n", i);
+                        } else {
+                            IONIA_STREAMER_LOGF("[AudioCallback] Packet %zu write success\n", i);
+                        }
                     }
                     
                     if (written) {
                         uint64_t newCount = m_audioPackets.fetch_add(1) + 1;
-                        fprintf(stderr, "[AudioCallback] Audio packets now: %llu\n", newCount);
-                        fflush(stderr);
+                        if (debug) {
+                            IONIA_STREAMER_LOGF("[AudioCallback] Audio packets now: %llu\n", newCount);
+                        }
                         
                         // Detect gaps in audio packets (packets not being written)
                         if (newCount % 50 == 0) {
                             uint64_t expectedPackets = m_audioFramesEncoded.load() / 256;  // Rough estimate
                             if (newCount < expectedPackets / 2) {
-                                fprintf(stderr, "[AudioCallback] WARNING: Audio packet gap detected! Expected ~%llu, got %llu\n",
-                                        expectedPackets, newCount);
-                                fflush(stderr);
+                                IONIA_STREAMER_LOGF(
+                                    "[AudioCallback] WARNING: Audio packet gap detected! Expected ~%llu, got %llu\n",
+                                    expectedPackets,
+                                    newCount);
                             }
                         }
                     } else {
-                        fprintf(stderr, "[AudioCallback] Packet %zu NOT written (buffer full?)\n", i);
-                        fflush(stderr);
+                        if (debug) {
+                            IONIA_STREAMER_LOGF("[AudioCallback] Packet %zu NOT written (buffer full?)\n", i);
+                        }
                     }
                 } catch (const std::exception& e) {
-                    fprintf(stderr, "[AudioCallback] Packet %zu exception: %s\n", i, e.what());
-                    fflush(stderr);
+                    Ionia::LogErrorf("[AudioCallback] Packet %zu exception: %s\n", i, e.what());
                 } catch (const _com_error& e) {
-                    fprintf(stderr, "[AudioCallback] Packet %zu COM error: 0x%08lx - %s\n", i, e.Error(), e.ErrorMessage());
-                    fflush(stderr);
+                    Ionia::LogErrorf(
+                        "[AudioCallback] Packet %zu COM error: 0x%08lx - %s\n",
+                        i,
+                        e.Error(),
+                        e.ErrorMessage());
                 } catch (...) {
-                    fprintf(stderr, "[AudioCallback] Packet %zu unknown exception\n", i);
-                    fflush(stderr);
+                    Ionia::LogErrorf("[AudioCallback] Packet %zu unknown exception\n", i);
                 }
             }
         } catch (const std::exception& e) {
-            fprintf(stderr, "[AudioCallback] Encode exception: %s\n", e.what());
-            fflush(stderr);
+            Ionia::LogErrorf("[AudioCallback] Encode exception: %s\n", e.what());
         } catch (...) {
-            fprintf(stderr, "[AudioCallback] Encode unknown exception\n");
-            fflush(stderr);
+            Ionia::LogErrorf("[AudioCallback] Encode unknown exception\n");
         }
     });
 
@@ -422,66 +449,58 @@ Napi::Value VideoAudioStreamerAddon::Initialize(const Napi::CallbackInfo& info) 
 /* ========================================================= */
 
 Napi::Value VideoAudioStreamerAddon::Start(const Napi::CallbackInfo& info) {
-    fprintf(stderr, "[Start] BEGIN\n");
+    IONIA_STREAMER_LOGF("[Start] BEGIN\n");
     if (m_isRunning) {
-        fprintf(stderr, "[Start] Already running, returning false\n");
+        IONIA_STREAMER_LOGF("[Start] Already running, returning false\n");
         return Napi::Boolean::New(info.Env(), false);
     }
 
-    fprintf(stderr, "[Start] Setting flags\n");
+    IONIA_STREAMER_LOGF("[Start] Setting flags\n");
     m_shouldStop = false;
     m_isRunning = true;
 
-    fprintf(stderr, "[Start] Starting audio capture\n");
+    IONIA_STREAMER_LOGF("[Start] Starting audio capture\n");
     m_audioCapture->Start();
     
-    fprintf(stderr, "[Start] Starting audio engine\n");
+    IONIA_STREAMER_LOGF("[Start] Starting audio engine\n");
     m_audioEngine->Start();
     
-    fprintf(stderr, "[Start] Starting video engine\n");
+    IONIA_STREAMER_LOGF("[Start] Starting video engine\n");
     m_videoEngine->Start();
 
-    fprintf(stderr, "[Start] Spawning capture thread\n");
-    fflush(stderr);
+    IONIA_STREAMER_LOGF("[Start] Spawning capture thread\n");
     if (m_enableCaptureThread) {
         m_captureThread = std::thread(&VideoAudioStreamerAddon::CaptureThread, this);
-        fprintf(stderr, "[Start] ✓ CaptureThread spawned\n");
+        IONIA_STREAMER_LOGF("[Start] CaptureThread spawned\n");
     } else {
-        fprintf(stderr, "[Start] ✗ CaptureThread DISABLED\n");
+        IONIA_STREAMER_LOGF("[Start] CaptureThread DISABLED\n");
     }
-    fflush(stderr);
     
-    fprintf(stderr, "[Start] Spawning video tick thread\n");
-    fflush(stderr);
+    IONIA_STREAMER_LOGF("[Start] Spawning video tick thread\n");
     if (m_enableVideoTickThread) {
         m_videoTickThread = std::thread(&VideoAudioStreamerAddon::VideoTickThread, this);
-        fprintf(stderr, "[Start] ✓ VideoTickThread spawned\n");
+        IONIA_STREAMER_LOGF("[Start] VideoTickThread spawned\n");
     } else {
-        fprintf(stderr, "[Start] ✗ VideoTickThread DISABLED\n");
+        IONIA_STREAMER_LOGF("[Start] VideoTickThread DISABLED\n");
     }
-    fflush(stderr);
     
-    fprintf(stderr, "[Start] Spawning audio tick thread\n");
-    fflush(stderr);
+    IONIA_STREAMER_LOGF("[Start] Spawning audio tick thread\n");
     if (m_enableAudioTickThread) {
         m_audioTickThread = std::thread(&VideoAudioStreamerAddon::AudioTickThread, this);
-        fprintf(stderr, "[Start] ✓ AudioTickThread spawned\n");
+        IONIA_STREAMER_LOGF("[Start] AudioTickThread spawned\n");
     } else {
-        fprintf(stderr, "[Start] ✗ AudioTickThread DISABLED\n");
+        IONIA_STREAMER_LOGF("[Start] AudioTickThread DISABLED\n");
     }
-    fflush(stderr);
     
-    fprintf(stderr, "[Start] Spawning network send thread\n");
-    fflush(stderr);
+    IONIA_STREAMER_LOGF("[Start] Spawning network send thread\n");
     if (m_enableNetworkSendThread) {
         m_networkThread = std::thread(&VideoAudioStreamerAddon::NetworkSendThread, this);
-        fprintf(stderr, "[Start] ✓ NetworkSendThread spawned\n");
+        IONIA_STREAMER_LOGF("[Start] NetworkSendThread spawned\n");
     } else {
-        fprintf(stderr, "[Start] ✗ NetworkSendThread DISABLED\n");
+        IONIA_STREAMER_LOGF("[Start] NetworkSendThread DISABLED\n");
     }
-    fflush(stderr);
     
-    fprintf(stderr, "[Start] ALL THREADS SPAWNED SUCCESSFULLY\n");
+    IONIA_STREAMER_LOGF("[Start] ALL THREADS SPAWNED SUCCESSFULLY\n");
     return Napi::Boolean::New(info.Env(), true);
 }
 
@@ -502,391 +521,494 @@ Napi::Value VideoAudioStreamerAddon::Stop(const Napi::CallbackInfo& info) {
 /* ========================================================= */
 
 void VideoAudioStreamerAddon::CaptureThread() {
-    fprintf(stderr, "[CaptureThread] === STARTED === (shouldStop=%d)\n", m_shouldStop.load());
-    fflush(stderr);
+    IONIA_STREAMER_LOGF("[CaptureThread] === STARTED === (shouldStop=%d)\n", m_shouldStop.load());
     
     try {
-        fprintf(stderr, "[CaptureThread] Checking components\n");
-        fflush(stderr);
+        IONIA_STREAMER_LOGF("[CaptureThread] Checking components\n");
         if (!m_videoEncoder || !m_videoEngine) {
-            fprintf(stderr, "[CaptureThread] NULL component: encoder=%p, engine=%p\n", m_videoEncoder.get(), m_videoEngine.get());
-            fflush(stderr);
+            Ionia::LogErrorf(
+                "[CaptureThread] NULL component: encoder=%p, engine=%p\n",
+                m_videoEncoder.get(),
+                m_videoEngine.get());
             return;
         }
         
         bool useRealCapture = m_desktop && !m_useInjectedFrames;
-        fprintf(stderr, "[CaptureThread] useRealCapture=%d, desktop=%p, useInjected=%d\n", useRealCapture, m_desktop.get(), m_useInjectedFrames);
-        fflush(stderr);
+        IONIA_STREAMER_LOGF(
+            "[CaptureThread] useRealCapture=%d, desktop=%p, useInjected=%d\n",
+            useRealCapture,
+            m_desktop.get(),
+            m_useInjectedFrames);
         
         if (useRealCapture && !m_desktop) {
-            fprintf(stderr, "[CaptureThread] DesktopDuplication not initialized\n");
-            fflush(stderr);
+            Ionia::LogErrorf("[CaptureThread] DesktopDuplication not initialized\n");
             return;
         }
         
         std::vector<uint8_t> frame(m_width * m_height * 4);
-        fprintf(stderr, "[CaptureThread] Allocated frame buffer: %ux%u = %zu bytes\n", m_width, m_height, frame.size());
-        fflush(stderr);
+        IONIA_STREAMER_LOGF(
+            "[CaptureThread] Allocated frame buffer: %ux%u = %zu bytes\n",
+            m_width,
+            m_height,
+            frame.size());
 
         int loopCount = 0;
         while (!m_shouldStop) {
             loopCount++;
             try {
-                fprintf(stderr, "[CaptureThread] Loop %d: START\n", loopCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF("[CaptureThread] Loop %d: START\n", loopCount);
                 
                 bool frameReady = false;
                 
                 if (m_useInjectedFrames) {
-                    fprintf(stderr, "[CaptureThread] Loop %d: Trying injected frame mode\n", loopCount);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[CaptureThread] Loop %d: Trying injected frame mode\n",
+                        loopCount);
                     try {
                         {
                             std::lock_guard<std::mutex> lock(m_injectedFrameMutex);
-                            fprintf(stderr, "[CaptureThread] Loop %d: Acquired injected frame lock\n", loopCount);
-                            fflush(stderr);
+                            IONIA_STREAMER_LOGF(
+                                "[CaptureThread] Loop %d: Acquired injected frame lock\n",
+                                loopCount);
                             if (m_hasInjectedFrame) {
-                                fprintf(stderr, "[CaptureThread] Loop %d: Copying injected frame\n", loopCount);
-                                fflush(stderr);
+                                IONIA_STREAMER_LOGF(
+                                    "[CaptureThread] Loop %d: Copying injected frame\n",
+                                    loopCount);
                                 std::copy(m_injectedFrameBuffer.begin(), m_injectedFrameBuffer.end(), frame.begin());
-                                fprintf(stderr, "[CaptureThread] Loop %d: Copy complete\n", loopCount);
-                                fflush(stderr);
+                                IONIA_STREAMER_LOGF(
+                                    "[CaptureThread] Loop %d: Copy complete\n",
+                                    loopCount);
                                 m_hasInjectedFrame = false;
                                 frameReady = true;
                             }
                         }
-                        fprintf(stderr, "[CaptureThread] Loop %d: Released injected frame lock\n", loopCount);
-                        fflush(stderr);
+                        IONIA_STREAMER_LOGF(
+                            "[CaptureThread] Loop %d: Released injected frame lock\n",
+                            loopCount);
                     } catch (const std::exception& e) {
-                        fprintf(stderr, "[CaptureThread] Loop %d: INJECTED FRAME EXCEPTION: %s\n", loopCount, e.what());
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[CaptureThread] Loop %d: INJECTED FRAME EXCEPTION: %s\n",
+                            loopCount,
+                            e.what());
                         break;
                     } catch (...) {
-                        fprintf(stderr, "[CaptureThread] Loop %d: INJECTED FRAME UNKNOWN EXCEPTION\n", loopCount);
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[CaptureThread] Loop %d: INJECTED FRAME UNKNOWN EXCEPTION\n",
+                            loopCount);
                         break;
                     }
                 } else if (useRealCapture) {
-                    fprintf(stderr, "[CaptureThread] Loop %d: Trying real desktop capture\n", loopCount);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[CaptureThread] Loop %d: Trying real desktop capture\n",
+                        loopCount);
                     try {
-                        fprintf(stderr, "[CaptureThread] Loop %d: Calling m_desktop->CaptureFrame()\n", loopCount);
-                        fflush(stderr);
+                        IONIA_STREAMER_LOGF(
+                            "[CaptureThread] Loop %d: Calling m_desktop->CaptureFrame()\n",
+                            loopCount);
                         uint32_t w, h;
                         int64_t ts;
                         if (m_desktop->CaptureFrame(frame.data(), &w, &h, &ts)) {
-                            fprintf(stderr, "[CaptureThread] Loop %d: CaptureFrame returned true\n", loopCount);
-                            fflush(stderr);
+                            IONIA_STREAMER_LOGF(
+                                "[CaptureThread] Loop %d: CaptureFrame returned true\n",
+                                loopCount);
                             frameReady = true;
                         } else {
-                            fprintf(stderr, "[CaptureThread] Loop %d: CaptureFrame returned false\n", loopCount);
-                            fflush(stderr);
+                            IONIA_STREAMER_LOGF(
+                                "[CaptureThread] Loop %d: CaptureFrame returned false\n",
+                                loopCount);
                         }
                     } catch (const std::exception& e) {
-                        fprintf(stderr, "[CaptureThread] Loop %d: DESKTOP CAPTURE EXCEPTION: %s\n", loopCount, e.what());
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[CaptureThread] Loop %d: DESKTOP CAPTURE EXCEPTION: %s\n",
+                            loopCount,
+                            e.what());
                         break;
                     } catch (...) {
-                        fprintf(stderr, "[CaptureThread] Loop %d: DESKTOP CAPTURE UNKNOWN EXCEPTION\n", loopCount);
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[CaptureThread] Loop %d: DESKTOP CAPTURE UNKNOWN EXCEPTION\n",
+                            loopCount);
                         break;
                     }
                 }
                 
-                fprintf(stderr, "[CaptureThread] Loop %d: frameReady=%d\n", loopCount, frameReady ? 1 : 0);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF(
+                    "[CaptureThread] Loop %d: frameReady=%d\n",
+                    loopCount,
+                    frameReady ? 1 : 0);
                 
                 if (frameReady) {
-                    fprintf(stderr, "[CaptureThread] Loop %d: Calling m_videoEngine->PushFrame()\n", loopCount);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[CaptureThread] Loop %d: Calling m_videoEngine->PushFrame()\n",
+                        loopCount);
                     try {
                         m_videoEngine->PushFrame(frame.data());
-                        fprintf(stderr, "[CaptureThread] Loop %d: PushFrame() succeeded\n", loopCount);
-                        fflush(stderr);
+                        IONIA_STREAMER_LOGF(
+                            "[CaptureThread] Loop %d: PushFrame() succeeded\n",
+                            loopCount);
                     } catch (const std::exception& e) {
-                        fprintf(stderr, "[CaptureThread] Loop %d: PUSHFRAME EXCEPTION: %s\n", loopCount, e.what());
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[CaptureThread] Loop %d: PUSHFRAME EXCEPTION: %s\n",
+                            loopCount,
+                            e.what());
                         break;
                     } catch (...) {
-                        fprintf(stderr, "[CaptureThread] Loop %d: PUSHFRAME UNKNOWN EXCEPTION\n", loopCount);
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[CaptureThread] Loop %d: PUSHFRAME UNKNOWN EXCEPTION\n",
+                            loopCount);
                         break;
                     }
                     
-                    fprintf(stderr, "[CaptureThread] Loop %d: Incrementing video frame count\n", loopCount);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[CaptureThread] Loop %d: Incrementing video frame count\n",
+                        loopCount);
                     m_videoFrames.fetch_add(1);
-                    fprintf(stderr, "[CaptureThread] Loop %d: Video frame count updated to %llu\n", loopCount, m_videoFrames.load());
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[CaptureThread] Loop %d: Video frame count updated to %llu\n",
+                        loopCount,
+                        m_videoFrames.load());
                     
                     if (loopCount % 10 == 0) {
-                        fprintf(stderr, "[CaptureThread] Loop %d: Pushed frame to engine (total=%llu)\n", loopCount, m_videoFrames.load());
-                        fflush(stderr);
+                        IONIA_STREAMER_LOGF(
+                            "[CaptureThread] Loop %d: Pushed frame to engine (total=%llu)\n",
+                            loopCount,
+                            m_videoFrames.load());
                     }
                 } else {
                     if (loopCount % 100 == 0) {
-                        fprintf(stderr, "[CaptureThread] Loop %d: No frame ready, sleeping 1ms\n", loopCount);
-                        fflush(stderr);
+                        IONIA_STREAMER_LOGF(
+                            "[CaptureThread] Loop %d: No frame ready, sleeping 1ms\n",
+                            loopCount);
                     }
-                    fprintf(stderr, "[CaptureThread] Loop %d: Sleeping\n", loopCount);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF("[CaptureThread] Loop %d: Sleeping\n", loopCount);
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    fprintf(stderr, "[CaptureThread] Loop %d: Wake from sleep\n", loopCount);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[CaptureThread] Loop %d: Wake from sleep\n",
+                        loopCount);
                 }
-                fprintf(stderr, "[CaptureThread] Loop %d: END\n", loopCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF("[CaptureThread] Loop %d: END\n", loopCount);
             } catch (const std::exception& e) {
-                fprintf(stderr, "[CaptureThread] Loop %d: INNER EXCEPTION: %s\n", loopCount, e.what());
-                fflush(stderr);
+                Ionia::LogErrorf(
+                    "[CaptureThread] Loop %d: INNER EXCEPTION: %s\n",
+                    loopCount,
+                    e.what());
                 break;
             } catch (...) {
-                fprintf(stderr, "[CaptureThread] Loop %d: INNER UNKNOWN EXCEPTION\n", loopCount);
-                fflush(stderr);
+                Ionia::LogErrorf(
+                    "[CaptureThread] Loop %d: INNER UNKNOWN EXCEPTION\n",
+                    loopCount);
                 break;
             }
         }
-        fprintf(stderr, "[CaptureThread] Exited loop after %d iterations (shouldStop=%d)\n", loopCount, m_shouldStop.load());
-        fflush(stderr);
+        IONIA_STREAMER_LOGF(
+            "[CaptureThread] Exited loop after %d iterations (shouldStop=%d)\n",
+            loopCount,
+            m_shouldStop.load());
     } catch (const std::exception& e) {
-        fprintf(stderr, "[CaptureThread] OUTER EXCEPTION: %s\n", e.what());
-        fflush(stderr);
+        Ionia::LogErrorf("[CaptureThread] OUTER EXCEPTION: %s\n", e.what());
     } catch (...) {
-        fprintf(stderr, "[CaptureThread] OUTER UNKNOWN EXCEPTION\n");
-        fflush(stderr);
+        Ionia::LogErrorf("[CaptureThread] OUTER UNKNOWN EXCEPTION\n");
     }
-    fprintf(stderr, "[CaptureThread] === FINISHED === (shouldStop=%d, isRunning=%d)\n", m_shouldStop.load(), m_isRunning.load());
-    fflush(stderr);
+    IONIA_STREAMER_LOGF(
+        "[CaptureThread] === FINISHED === (shouldStop=%d, isRunning=%d)\n",
+        m_shouldStop.load(),
+        m_isRunning.load());
 }
 
 void VideoAudioStreamerAddon::VideoTickThread() {
-    fprintf(stderr, "[VideoTickThread] === STARTED === (shouldStop=%d)\n", m_shouldStop.load());
-    fflush(stderr);
+    IONIA_STREAMER_LOGF("[VideoTickThread] === STARTED === (shouldStop=%d)\n", m_shouldStop.load());
     
     try {
-        fprintf(stderr, "[VideoTickThread] Checking components\n");
-        fflush(stderr);
+        IONIA_STREAMER_LOGF("[VideoTickThread] Checking components\n");
         if (!m_videoEngine || !m_videoEncoder || !m_streamMuxer) {
-            fprintf(stderr, "[VideoTickThread] NULL component: engine=%p, encoder=%p, muxer=%p\n", 
-                    m_videoEngine.get(), m_videoEncoder.get(), m_streamMuxer.get());
-            fflush(stderr);
+            Ionia::LogErrorf(
+                "[VideoTickThread] NULL component: engine=%p, encoder=%p, muxer=%p\n",
+                m_videoEngine.get(),
+                m_videoEncoder.get(),
+                m_streamMuxer.get());
             return;
         }
 
         std::vector<uint8_t> frame(m_width * m_height * 4);
-        fprintf(stderr, "[VideoTickThread] Allocated frame buffer: %ux%u = %zu bytes\n", m_width, m_height, frame.size());
-        fflush(stderr);
+        IONIA_STREAMER_LOGF(
+            "[VideoTickThread] Allocated frame buffer: %ux%u = %zu bytes\n",
+            m_width,
+            m_height,
+            frame.size());
         
         int loopCount = 0;
         while (!m_shouldStop) {
             loopCount++;
             try {
-                fprintf(stderr, "[VideoTickThread] Loop %d: START\n", loopCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF("[VideoTickThread] Loop %d: START\n", loopCount);
                 
                 // Get the frame number that should be encoded at this time
-                fprintf(stderr, "[VideoTickThread] Loop %d: Calling GetExpectedFrameNumber()\n", loopCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF(
+                    "[VideoTickThread] Loop %d: Calling GetExpectedFrameNumber()\n",
+                    loopCount);
                 uint64_t expectedFrame = m_videoEngine->GetExpectedFrameNumber();
-                fprintf(stderr, "[VideoTickThread] Loop %d: GetExpectedFrameNumber returned %llu\n", loopCount, expectedFrame);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF(
+                    "[VideoTickThread] Loop %d: GetExpectedFrameNumber returned %llu\n",
+                    loopCount,
+                    expectedFrame);
                 
-                fprintf(stderr, "[VideoTickThread] Loop %d: Calling GetFrameNumber()\n", loopCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF(
+                    "[VideoTickThread] Loop %d: Calling GetFrameNumber()\n",
+                    loopCount);
                 uint64_t currentFrame = m_videoEngine->GetFrameNumber();
-                fprintf(stderr, "[VideoTickThread] Loop %d: GetFrameNumber returned %llu\n", loopCount, currentFrame);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF(
+                    "[VideoTickThread] Loop %d: GetFrameNumber returned %llu\n",
+                    loopCount,
+                    currentFrame);
 
                 if (loopCount % 20 == 0) {
-                    fprintf(stderr, "[VideoTickThread] Loop %d: expected=%llu, current=%llu\n", loopCount, expectedFrame, currentFrame);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[VideoTickThread] Loop %d: expected=%llu, current=%llu\n",
+                        loopCount,
+                        expectedFrame,
+                        currentFrame);
                 }
 
                 if (currentFrame < expectedFrame) {
                     // Time to encode another frame
-                    fprintf(stderr, "[VideoTickThread] Loop %d: Time to encode, calling PopFrameFromBuffer()\n", loopCount);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[VideoTickThread] Loop %d: Time to encode, calling PopFrameFromBuffer()\n",
+                        loopCount);
                     
                     bool hasFrame = false;
                     try {
                         hasFrame = m_videoEngine->PopFrameFromBuffer(frame);
-                        fprintf(stderr, "[VideoTickThread] Loop %d: PopFrameFromBuffer returned %d\n", loopCount, hasFrame ? 1 : 0);
-                        fflush(stderr);
+                        IONIA_STREAMER_LOGF(
+                            "[VideoTickThread] Loop %d: PopFrameFromBuffer returned %d\n",
+                            loopCount,
+                            hasFrame ? 1 : 0);
                     } catch (const std::exception& e) {
-                        fprintf(stderr, "[VideoTickThread] Loop %d: POPFRAME EXCEPTION: %s\n", loopCount, e.what());
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[VideoTickThread] Loop %d: POPFRAME EXCEPTION: %s\n",
+                            loopCount,
+                            e.what());
                         hasFrame = false;
                     } catch (...) {
-                        fprintf(stderr, "[VideoTickThread] Loop %d: POPFRAME UNKNOWN EXCEPTION\n", loopCount);
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[VideoTickThread] Loop %d: POPFRAME UNKNOWN EXCEPTION\n",
+                            loopCount);
                         hasFrame = false;
                     }
                     
                     // ✅ OBS-LIKE FRAME DUPLICATION: If no frame in buffer, use last frame
                     if (!hasFrame) {
-                        fprintf(stderr, "[VideoTickThread] Loop %d: No frame in buffer, trying to use last frame\n", loopCount);
-                        fflush(stderr);
+                        IONIA_STREAMER_LOGF(
+                            "[VideoTickThread] Loop %d: No frame in buffer, trying to use last frame\n",
+                            loopCount);
                         try {
                             if (m_videoEngine->GetLastFrame(frame)) {
-                                fprintf(stderr, "[VideoTickThread] Loop %d: Using duplicated last frame\n", loopCount);
-                                fflush(stderr);
+                                IONIA_STREAMER_LOGF(
+                                    "[VideoTickThread] Loop %d: Using duplicated last frame\n",
+                                    loopCount);
                                 hasFrame = true;
                             } else {
-                                fprintf(stderr, "[VideoTickThread] Loop %d: No last frame available, creating black frame\n", loopCount);
-                                fflush(stderr);
+                                IONIA_STREAMER_LOGF(
+                                    "[VideoTickThread] Loop %d: No last frame available, creating black frame\n",
+                                    loopCount);
                                 // Fill with black (0x00)
                                 std::fill(frame.begin(), frame.end(), 0);
                                 hasFrame = true;
                             }
                         } catch (const std::exception& e) {
-                            fprintf(stderr, "[VideoTickThread] Loop %d: GETLASTFRAME EXCEPTION: %s\n", loopCount, e.what());
-                            fflush(stderr);
+                            Ionia::LogErrorf(
+                                "[VideoTickThread] Loop %d: GETLASTFRAME EXCEPTION: %s\n",
+                                loopCount,
+                                e.what());
                             // Still try to encode black frame
                             std::fill(frame.begin(), frame.end(), 0);
                             hasFrame = true;
                         } catch (...) {
-                            fprintf(stderr, "[VideoTickThread] Loop %d: GETLASTFRAME UNKNOWN EXCEPTION\n", loopCount);
-                            fflush(stderr);
+                            Ionia::LogErrorf(
+                                "[VideoTickThread] Loop %d: GETLASTFRAME UNKNOWN EXCEPTION\n",
+                                loopCount);
                             std::fill(frame.begin(), frame.end(), 0);
                             hasFrame = true;
                         }
                     }
                     
                     if (hasFrame) {
-                        fprintf(stderr, "[VideoTickThread] Loop %d: Frame ready, calling EncodeFrame()\n", loopCount);
-                        fflush(stderr);
+                        IONIA_STREAMER_LOGF(
+                            "[VideoTickThread] Loop %d: Frame ready, calling EncodeFrame()\n",
+                            loopCount);
                         
                         // Frame data available (real or duplicated), encode it
                         try {
                             auto packets = m_videoEncoder->EncodeFrame(frame.data());
-                            fprintf(stderr, "[VideoTickThread] Loop %d: EncodeFrame returned %zu packets\n", loopCount, packets.size());
-                            fflush(stderr);
+                            IONIA_STREAMER_LOGF(
+                                "[VideoTickThread] Loop %d: EncodeFrame returned %zu packets\n",
+                                loopCount,
+                                packets.size());
                             
                             for (size_t i = 0; i < packets.size(); i++) {
-                                fprintf(stderr, "[VideoTickThread] Loop %d: Writing packet %zu of %zu\n", loopCount, i, packets.size());
-                                fflush(stderr);
+                                IONIA_STREAMER_LOGF(
+                                    "[VideoTickThread] Loop %d: Writing packet %zu of %zu\n",
+                                    loopCount,
+                                    i,
+                                    packets.size());
                                 
                                 try {
                                     // Check muxer validity before writing
                                     if (!m_streamMuxer) {
-                                        fprintf(stderr, "[VideoTickThread] Loop %d: muxer is NULL, skipping write\n", loopCount);
-                                        fflush(stderr);
+                                        Ionia::LogErrorf(
+                                            "[VideoTickThread] Loop %d: muxer is NULL, skipping write\n",
+                                            loopCount);
                                         break;
                                     }
                                     
                                     auto& p = packets[i];
-                                    fprintf(stderr, "[VideoTickThread] Loop %d: Packet size=%zu, keyframe=%d\n", loopCount, p.data.size(), p.isKeyframe ? 1 : 0);
-                                    fflush(stderr);
+                                    IONIA_STREAMER_LOGF(
+                                        "[VideoTickThread] Loop %d: Packet size=%zu, keyframe=%d\n",
+                                        loopCount,
+                                        p.data.size(),
+                                        p.isKeyframe ? 1 : 0);
                                     
-                                    fprintf(stderr, "[VideoTickThread] Loop %d: Muxer state: connected=%d, backpressure=%d\n", 
-                                            loopCount, m_streamMuxer->IsConnected(), m_streamMuxer->IsBackpressure());
-                                    fflush(stderr);
+                                    IONIA_STREAMER_LOGF(
+                                        "[VideoTickThread] Loop %d: Muxer state: connected=%d, backpressure=%d\n",
+                                        loopCount,
+                                        m_streamMuxer->IsConnected(),
+                                        m_streamMuxer->IsBackpressure());
                                     
-                                    fprintf(stderr, "[VideoTickThread] Loop %d: Calling WriteVideoPacket[%zu] with muxer=%p\n", loopCount, i, m_streamMuxer.get());
-                                    fflush(stderr);
+                                    IONIA_STREAMER_LOGF(
+                                        "[VideoTickThread] Loop %d: Calling WriteVideoPacket[%zu] with muxer=%p\n",
+                                        loopCount,
+                                        i,
+                                        m_streamMuxer.get());
                                     
                                     bool written = m_streamMuxer->WriteVideoPacket(&p, currentFrame);
-                                    fprintf(stderr, "[VideoTickThread] Loop %d: WriteVideoPacket[%zu] returned=%s\n", loopCount, i, written ? "true" : "false");
-                                    fflush(stderr);
+                                    IONIA_STREAMER_LOGF(
+                                        "[VideoTickThread] Loop %d: WriteVideoPacket[%zu] returned=%s\n",
+                                        loopCount,
+                                        i,
+                                        written ? "true" : "false");
                                     
                                     if (written) {
-                                        fprintf(stderr, "[VideoTickThread] Loop %d: Incrementing video packet count\n", loopCount);
-                                        fflush(stderr);
+                                        IONIA_STREAMER_LOGF(
+                                            "[VideoTickThread] Loop %d: Incrementing video packet count\n",
+                                            loopCount);
                                         m_videoPackets.fetch_add(1);
-                                        fprintf(stderr, "[VideoTickThread] Loop %d: Video packet count now %llu\n", loopCount, m_videoPackets.load());
-                                        fflush(stderr);
+                                        IONIA_STREAMER_LOGF(
+                                            "[VideoTickThread] Loop %d: Video packet count now %llu\n",
+                                            loopCount,
+                                            m_videoPackets.load());
                                     } else {
-                                        fprintf(stderr, "[VideoTickThread] Loop %d: WriteVideoPacket returned false (backpressure or buffer full?)\n", loopCount);
-                                        fflush(stderr);
+                                        IONIA_STREAMER_LOGF(
+                                            "[VideoTickThread] Loop %d: WriteVideoPacket returned false (backpressure or buffer full?)\n",
+                                            loopCount);
                                     }
                                 } catch (const std::exception& e) {
-                                    fprintf(stderr, "[VideoTickThread] Loop %d: WRITEPACKET[%zu] STD::EXCEPTION: %s\n", loopCount, i, e.what());
-                                    fflush(stderr);
+                                    Ionia::LogErrorf(
+                                        "[VideoTickThread] Loop %d: WRITEPACKET[%zu] STD::EXCEPTION: %s\n",
+                                        loopCount,
+                                        i,
+                                        e.what());
                                     // Don't break - try next packet
                                 } catch (const _com_error& e) {
-                                    fprintf(stderr, "[VideoTickThread] Loop %d: WRITEPACKET[%zu] COM_ERROR: 0x%08lx - %s\n", loopCount, i, e.Error(), e.ErrorMessage());
-                                    fflush(stderr);
+                                    Ionia::LogErrorf(
+                                        "[VideoTickThread] Loop %d: WRITEPACKET[%zu] COM_ERROR: 0x%08lx - %s\n",
+                                        loopCount,
+                                        i,
+                                        e.Error(),
+                                        e.ErrorMessage());
                                     // Don't break - try next packet
                                 } catch (...) {
-                                    fprintf(stderr, "[VideoTickThread] Loop %d: WRITEPACKET[%zu] UNKNOWN EXCEPTION (possibly COM)\n", loopCount, i);
-                                    fflush(stderr);
+                                    Ionia::LogErrorf(
+                                        "[VideoTickThread] Loop %d: WRITEPACKET[%zu] UNKNOWN EXCEPTION (possibly COM)\n",
+                                        loopCount,
+                                        i);
                                     // Don't break - try next packet
                                 }
                             }
                         } catch (const std::exception& e) {
-                            fprintf(stderr, "[VideoTickThread] Loop %d: ENCODE EXCEPTION: %s\n", loopCount, e.what());
-                            fflush(stderr);
+                            Ionia::LogErrorf(
+                                "[VideoTickThread] Loop %d: ENCODE EXCEPTION: %s\n",
+                                loopCount,
+                                e.what());
                             break;
                         } catch (...) {
-                            fprintf(stderr, "[VideoTickThread] Loop %d: ENCODE UNKNOWN EXCEPTION\n", loopCount);
-                            fflush(stderr);
+                            Ionia::LogErrorf(
+                                "[VideoTickThread] Loop %d: ENCODE UNKNOWN EXCEPTION\n",
+                                loopCount);
                             break;
                         }
                     }
                     
                     // ✅ CRITICAL FIX: Always advance frame number, regardless of frame availability
-                    fprintf(stderr, "[VideoTickThread] Loop %d: Calling AdvanceFrameNumber()\n", loopCount);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[VideoTickThread] Loop %d: Calling AdvanceFrameNumber()\n",
+                        loopCount);
                     try {
                         m_videoEngine->AdvanceFrameNumber();
-                        fprintf(stderr, "[VideoTickThread] Loop %d: AdvanceFrameNumber() succeeded (now at %llu)\n", loopCount, m_videoEngine->GetFrameNumber());
-                        fflush(stderr);
+                        IONIA_STREAMER_LOGF(
+                            "[VideoTickThread] Loop %d: AdvanceFrameNumber() succeeded (now at %llu)\n",
+                            loopCount,
+                            m_videoEngine->GetFrameNumber());
                     } catch (const std::exception& e) {
-                        fprintf(stderr, "[VideoTickThread] Loop %d: ADVANCEFRAME EXCEPTION: %s\n", loopCount, e.what());
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[VideoTickThread] Loop %d: ADVANCEFRAME EXCEPTION: %s\n",
+                            loopCount,
+                            e.what());
                         break;
                     } catch (...) {
-                        fprintf(stderr, "[VideoTickThread] Loop %d: ADVANCEFRAME UNKNOWN EXCEPTION\n", loopCount);
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[VideoTickThread] Loop %d: ADVANCEFRAME UNKNOWN EXCEPTION\n",
+                            loopCount);
                         break;
                     }
                 } else {
                     // No frame time yet, wait a bit
                     if (loopCount % 50 == 0) {
-                        fprintf(stderr, "[VideoTickThread] Loop %d: No frame time yet, sleeping 5ms\n", loopCount);
-                        fflush(stderr);
+                        IONIA_STREAMER_LOGF(
+                            "[VideoTickThread] Loop %d: No frame time yet, sleeping 5ms\n",
+                            loopCount);
                     }
-                    fprintf(stderr, "[VideoTickThread] Loop %d: Sleeping\n", loopCount);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF("[VideoTickThread] Loop %d: Sleeping\n", loopCount);
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-                    fprintf(stderr, "[VideoTickThread] Loop %d: Wake from sleep\n", loopCount);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[VideoTickThread] Loop %d: Wake from sleep\n",
+                        loopCount);
                 }
-                fprintf(stderr, "[VideoTickThread] Loop %d: END\n", loopCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF("[VideoTickThread] Loop %d: END\n", loopCount);
             } catch (const std::exception& e) {
-                fprintf(stderr, "[VideoTickThread] Loop %d: EXCEPTION: %s\n", loopCount, e.what());
-                fflush(stderr);
+                Ionia::LogErrorf(
+                    "[VideoTickThread] Loop %d: EXCEPTION: %s\n",
+                    loopCount,
+                    e.what());
                 break;
             } catch (...) {
-                fprintf(stderr, "[VideoTickThread] Loop %d: UNKNOWN EXCEPTION\n", loopCount);
-                fflush(stderr);
+                Ionia::LogErrorf(
+                    "[VideoTickThread] Loop %d: UNKNOWN EXCEPTION\n",
+                    loopCount);
                 break;
             }
         }
-        fprintf(stderr, "[VideoTickThread] Exited loop after %d iterations (shouldStop=%d)\n", loopCount, m_shouldStop.load());
-        fflush(stderr);
+        IONIA_STREAMER_LOGF(
+            "[VideoTickThread] Exited loop after %d iterations (shouldStop=%d)\n",
+            loopCount,
+            m_shouldStop.load());
     } catch (const std::exception& e) {
-        fprintf(stderr, "[VideoTickThread] OUTER EXCEPTION: %s\n", e.what());
-        fflush(stderr);
+        Ionia::LogErrorf("[VideoTickThread] OUTER EXCEPTION: %s\n", e.what());
     } catch (...) {
-        fprintf(stderr, "[VideoTickThread] OUTER UNKNOWN EXCEPTION\n");
-        fflush(stderr);
+        Ionia::LogErrorf("[VideoTickThread] OUTER UNKNOWN EXCEPTION\n");
     }
-    fprintf(stderr, "[VideoTickThread] === FINISHED === (shouldStop=%d, videoPackets=%llu)\n", m_shouldStop.load(), m_videoPackets.load());
-    fflush(stderr);
+    IONIA_STREAMER_LOGF(
+        "[VideoTickThread] === FINISHED === (shouldStop=%d, videoPackets=%llu)\n",
+        m_shouldStop.load(),
+        m_videoPackets.load());
 }
 
 void VideoAudioStreamerAddon::AudioTickThread() {
-    fprintf(stderr, "[AudioTickThread] === STARTED === (shouldStop=%d)\n", m_shouldStop.load());
-    fflush(stderr);
+    IONIA_STREAMER_LOGF("[AudioTickThread] === STARTED === (shouldStop=%d)\n", m_shouldStop.load());
     
     try {
-        fprintf(stderr, "[AudioTickThread] Checking components\n");
-        fflush(stderr);
+        IONIA_STREAMER_LOGF("[AudioTickThread] Checking components\n");
         if (!m_audioEngine) {
-            fprintf(stderr, "[AudioTickThread] NULL component: audioEngine=%p\n", m_audioEngine.get());
-            fflush(stderr);
+            Ionia::LogErrorf(
+                "[AudioTickThread] NULL component: audioEngine=%p\n",
+                m_audioEngine.get());
             return;
         }
 
@@ -905,46 +1027,59 @@ void VideoAudioStreamerAddon::AudioTickThread() {
         while (!m_shouldStop) {
             tickCount++;
             try {
-                fprintf(stderr, "[AudioTickThread] Loop %d: START\n", tickCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF("[AudioTickThread] Loop %d: START\n", tickCount);
                 
-                fprintf(stderr, "[AudioTickThread] Loop %d: Checking m_audioEngine pointer\n", tickCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF(
+                    "[AudioTickThread] Loop %d: Checking m_audioEngine pointer\n",
+                    tickCount);
                 
                 if (!m_audioEngine) {
-                    fprintf(stderr, "[AudioTickThread] Loop %d: audioEngine became NULL mid-loop\n", tickCount);
-                    fflush(stderr);
+                    Ionia::LogErrorf(
+                        "[AudioTickThread] Loop %d: audioEngine became NULL mid-loop\n",
+                        tickCount);
                     break;
                 }
-                fprintf(stderr, "[AudioTickThread] Loop %d: m_audioEngine pointer is valid (%p)\n", tickCount, m_audioEngine.get());
-                fflush(stderr);
+                IONIA_STREAMER_LOGF(
+                    "[AudioTickThread] Loop %d: m_audioEngine pointer is valid (%p)\n",
+                    tickCount,
+                    m_audioEngine.get());
                 
-                fprintf(stderr, "[AudioTickThread] Loop %d: Calling IsRunning()\n", tickCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF(
+                    "[AudioTickThread] Loop %d: Calling IsRunning()\n",
+                    tickCount);
                 bool isRunning = false;
                 try {
                     isRunning = m_audioEngine->IsRunning();
-                    fprintf(stderr, "[AudioTickThread] Loop %d: IsRunning() returned %d\n", tickCount, isRunning ? 1 : 0);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[AudioTickThread] Loop %d: IsRunning() returned %d\n",
+                        tickCount,
+                        isRunning ? 1 : 0);
                 } catch (const std::exception& e) {
-                    fprintf(stderr, "[AudioTickThread] Loop %d: ISRUNNING EXCEPTION: %s\n", tickCount, e.what());
-                    fflush(stderr);
+                    Ionia::LogErrorf(
+                        "[AudioTickThread] Loop %d: ISRUNNING EXCEPTION: %s\n",
+                        tickCount,
+                        e.what());
                     break;
                 } catch (...) {
-                    fprintf(stderr, "[AudioTickThread] Loop %d: ISRUNNING UNKNOWN EXCEPTION\n", tickCount);
-                    fflush(stderr);
+                    Ionia::LogErrorf(
+                        "[AudioTickThread] Loop %d: ISRUNNING UNKNOWN EXCEPTION\n",
+                        tickCount);
                     break;
                 }
                 
                 if (!isRunning) {
-                    fprintf(stderr, "[AudioTickThread] Loop %d: AudioEngine not running, exiting loop\n", tickCount);
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[AudioTickThread] Loop %d: AudioEngine not running, exiting loop\n",
+                        tickCount);
                     break;
                 }
                 
                 if (tickCount % 50 == 0) {
-                    fprintf(stderr, "[AudioTickThread] Loop %d: Audio ticks=%d, packets=%llu\n", tickCount, tickCount, m_audioPackets.load());
-                    fflush(stderr);
+                    IONIA_STREAMER_LOGF(
+                        "[AudioTickThread] Loop %d: Audio ticks=%d, packets=%llu\n",
+                        tickCount,
+                        tickCount,
+                        m_audioPackets.load());
                 }
                 
                 // Schedule next tick based on monotonic time (better than fixed sleeps).
@@ -961,13 +1096,16 @@ void VideoAudioStreamerAddon::AudioTickThread() {
                     try {
                         m_audioEngine->Tick();
                     } catch (const std::exception& e) {
-                        fprintf(stderr, "[AudioTickThread] Loop %d: TICK EXCEPTION: %s\n", tickCount, e.what());
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[AudioTickThread] Loop %d: TICK EXCEPTION: %s\n",
+                            tickCount,
+                            e.what());
                         m_shouldStop = true;
                         break;
                     } catch (...) {
-                        fprintf(stderr, "[AudioTickThread] Loop %d: TICK UNKNOWN EXCEPTION\n", tickCount);
-                        fflush(stderr);
+                        Ionia::LogErrorf(
+                            "[AudioTickThread] Loop %d: TICK UNKNOWN EXCEPTION\n",
+                            tickCount);
                         m_shouldStop = true;
                         break;
                     }
@@ -975,48 +1113,53 @@ void VideoAudioStreamerAddon::AudioTickThread() {
                     catchUps++;
                 }
                 
-                fprintf(stderr, "[AudioTickThread] Loop %d: END\n", tickCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF("[AudioTickThread] Loop %d: END\n", tickCount);
             } catch (const std::exception& e) {
-                fprintf(stderr, "[AudioTickThread] Loop %d: EXCEPTION: %s\n", tickCount, e.what());
-                fflush(stderr);
+                Ionia::LogErrorf(
+                    "[AudioTickThread] Loop %d: EXCEPTION: %s\n",
+                    tickCount,
+                    e.what());
                 break;
             } catch (...) {
-                fprintf(stderr, "[AudioTickThread] Loop %d: UNKNOWN EXCEPTION (likely COM/Windows exception)\n", tickCount);
-                fprintf(stderr, "[AudioTickThread] Loop %d: m_audioEngine ptr=%p, shouldStop=%d\n", 
-                        tickCount, m_audioEngine.get(), m_shouldStop.load());
-                fflush(stderr);
+                Ionia::LogErrorf(
+                    "[AudioTickThread] Loop %d: UNKNOWN EXCEPTION (likely COM/Windows exception)\n",
+                    tickCount);
+                Ionia::LogErrorf(
+                    "[AudioTickThread] Loop %d: m_audioEngine ptr=%p, shouldStop=%d\n",
+                    tickCount,
+                    m_audioEngine.get(),
+                    m_shouldStop.load());
                 break;
             }
         }
-        fprintf(stderr, "[AudioTickThread] Exited loop after %d ticks (shouldStop=%d)\n", tickCount, m_shouldStop.load());
-        fflush(stderr);
+        IONIA_STREAMER_LOGF(
+            "[AudioTickThread] Exited loop after %d ticks (shouldStop=%d)\n",
+            tickCount,
+            m_shouldStop.load());
     } catch (const std::exception& e) {
-        fprintf(stderr, "[AudioTickThread] OUTER EXCEPTION: %s\n", e.what());
-        fflush(stderr);
+        Ionia::LogErrorf("[AudioTickThread] OUTER EXCEPTION: %s\n", e.what());
     } catch (...) {
-        fprintf(stderr, "[AudioTickThread] OUTER UNKNOWN EXCEPTION\n");
-        fflush(stderr);
+        Ionia::LogErrorf("[AudioTickThread] OUTER UNKNOWN EXCEPTION\n");
     }
-    fprintf(stderr, "[AudioTickThread] === FINISHED === (shouldStop=%d, audioPackets=%llu)\n", m_shouldStop.load(), m_audioPackets.load());
-    fflush(stderr);
+    IONIA_STREAMER_LOGF(
+        "[AudioTickThread] === FINISHED === (shouldStop=%d, audioPackets=%llu)\n",
+        m_shouldStop.load(),
+        m_audioPackets.load());
 }
 
 void VideoAudioStreamerAddon::NetworkSendThread() {
-    fprintf(stderr, "[NetworkSendThread] === STARTED ===\n");
-    fflush(stderr);
+    IONIA_STREAMER_LOGF("[NetworkSendThread] === STARTED ===\n");
     
     if (!m_streamMuxer) {
-        fprintf(stderr, "[NetworkSendThread] FATAL: NULL streamMuxer\n");
-        fflush(stderr);
+        Ionia::LogErrorf("[NetworkSendThread] FATAL: NULL streamMuxer\n");
         return;
     }
     
-    fprintf(stderr, "[NetworkSendThread] Checking muxer state...\n");
-    fflush(stderr);
-    fprintf(stderr, "[NetworkSendThread] IsConnected=%d, IsBackpressure=%d\n", 
-            m_streamMuxer->IsConnected(), m_streamMuxer->IsBackpressure());
-    fflush(stderr);
+    IONIA_STREAMER_LOGF("[NetworkSendThread] Checking muxer state...\n");
+    IONIA_STREAMER_LOGF(
+        "[NetworkSendThread] IsConnected=%d, IsBackpressure=%d\n",
+        m_streamMuxer->IsConnected(),
+        m_streamMuxer->IsBackpressure());
     
     int sendAttempts = 0;
     int successCount = 0;
@@ -1028,17 +1171,22 @@ void VideoAudioStreamerAddon::NetworkSendThread() {
         try {
             // Check muxer state periodically
             if (loopCount % 1000 == 0) {
-                fprintf(stderr, "[NetworkSendThread] Loop %d: Connected=%d, Backpressure=%d, Attempts=%d, Success=%d, Failed=%d\n",
-                        loopCount, m_streamMuxer->IsConnected(), m_streamMuxer->IsBackpressure(),
-                        sendAttempts, successCount, failureCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF(
+                    "[NetworkSendThread] Loop %d: Connected=%d, Backpressure=%d, Attempts=%d, Success=%d, Failed=%d\n",
+                    loopCount,
+                    m_streamMuxer->IsConnected(),
+                    m_streamMuxer->IsBackpressure(),
+                    sendAttempts,
+                    successCount,
+                    failureCount);
             }
             
             // Try to send packet
             try {
                 if (!m_streamMuxer) {
-                    fprintf(stderr, "[NetworkSendThread] Loop %d: muxer became NULL\n", loopCount);
-                    fflush(stderr);
+                    Ionia::LogErrorf(
+                        "[NetworkSendThread] Loop %d: muxer became NULL\n",
+                        loopCount);
                     break;
                 }
                 
@@ -1048,8 +1196,9 @@ void VideoAudioStreamerAddon::NetworkSendThread() {
                 if (sent) {
                     successCount++;
                     if (successCount % 50 == 0) {
-                        fprintf(stderr, "[NetworkSendThread] Sent %d packets successfully\n", successCount);
-                        fflush(stderr);
+                        IONIA_STREAMER_LOGF(
+                            "[NetworkSendThread] Sent %d packets successfully\n",
+                            successCount);
                     }
                 } else {
                     // No packet available, sleep briefly
@@ -1058,44 +1207,57 @@ void VideoAudioStreamerAddon::NetworkSendThread() {
             } catch (const std::exception& e) {
                 failureCount++;
                 if (failureCount % 100 == 0) {
-                    fprintf(stderr, "[NetworkSendThread] SendNextBufferedPacket exception (count=%d): %s\n", 
-                            failureCount, e.what());
-                    fflush(stderr);
+                    Ionia::LogErrorf(
+                        "[NetworkSendThread] SendNextBufferedPacket exception (count=%d): %s\n",
+                        failureCount,
+                        e.what());
                 }
             } catch (const _com_error& e) {
                 failureCount++;
                 if (failureCount % 100 == 0) {
-                    fprintf(stderr, "[NetworkSendThread] SendNextBufferedPacket COM error (count=%d): 0x%08lx - %s\n",
-                            failureCount, e.Error(), e.ErrorMessage());
-                    fflush(stderr);
+                    Ionia::LogErrorf(
+                        "[NetworkSendThread] SendNextBufferedPacket COM error (count=%d): 0x%08lx - %s\n",
+                        failureCount,
+                        e.Error(),
+                        e.ErrorMessage());
                 }
             } catch (...) {
                 failureCount++;
                 if (failureCount % 100 == 0) {
-                    fprintf(stderr, "[NetworkSendThread] SendNextBufferedPacket unknown exception (count=%d)\n", failureCount);
-                    fflush(stderr);
+                    Ionia::LogErrorf(
+                        "[NetworkSendThread] SendNextBufferedPacket unknown exception (count=%d)\n",
+                        failureCount);
                 }
             }
         } catch (const std::exception& e) {
-            fprintf(stderr, "[NetworkSendThread] Loop %d OUTER STD::EXCEPTION: %s\n", loopCount, e.what());
-            fflush(stderr);
+            Ionia::LogErrorf(
+                "[NetworkSendThread] Loop %d OUTER STD::EXCEPTION: %s\n",
+                loopCount,
+                e.what());
             // Continue on exception, don't break
         } catch (const _com_error& e) {
-            fprintf(stderr, "[NetworkSendThread] Loop %d OUTER COM_ERROR: 0x%08lx - %s\n", loopCount, e.Error(), e.ErrorMessage());
-            fflush(stderr);
+            Ionia::LogErrorf(
+                "[NetworkSendThread] Loop %d OUTER COM_ERROR: 0x%08lx - %s\n",
+                loopCount,
+                e.Error(),
+                e.ErrorMessage());
             // Continue on exception, don't break
         } catch (...) {
             // Silently continue on unknown exception - likely thread/COM cleanup
             if (loopCount % 1000 == 0) {
-                fprintf(stderr, "[NetworkSendThread] Loop %d OUTER UNKNOWN EXCEPTION (continuing...)\n", loopCount);
-                fflush(stderr);
+                IONIA_STREAMER_LOGF(
+                    "[NetworkSendThread] Loop %d OUTER UNKNOWN EXCEPTION (continuing...)\n",
+                    loopCount);
             }
         }
     }
     
-    fprintf(stderr, "[NetworkSendThread] === EXITING === (Loops=%d, Attempts=%d, Success=%d, Failed=%d)\n", 
-            loopCount, sendAttempts, successCount, failureCount);
-    fflush(stderr);
+    IONIA_STREAMER_LOGF(
+        "[NetworkSendThread] === EXITING === (Loops=%d, Attempts=%d, Success=%d, Failed=%d)\n",
+        loopCount,
+        sendAttempts,
+        successCount,
+        failureCount);
 }
 
 /* ========================================================= */
@@ -1110,12 +1272,14 @@ void VideoAudioStreamerAddon::OnAudioData(const BYTE* data,
     static bool logged_desktop = false, logged_mic = false;
     if (format) {
         if (strcmp(src, "desktop") == 0 && !logged_desktop) {
-            fprintf(stderr, "[OnAudioData] DESKTOP: format->nSamplesPerSec = %u Hz\n", format->nSamplesPerSec);
-            fflush(stderr);
+            IONIA_STREAMER_LOGF(
+                "[OnAudioData] DESKTOP: format->nSamplesPerSec = %u Hz\n",
+                format->nSamplesPerSec);
             logged_desktop = true;
         } else if (strcmp(src, "mic") == 0 && !logged_mic) {
-            fprintf(stderr, "[OnAudioData] MIC: format->nSamplesPerSec = %u Hz\n", format->nSamplesPerSec);
-            fflush(stderr);
+            IONIA_STREAMER_LOGF(
+                "[OnAudioData] MIC: format->nSamplesPerSec = %u Hz\n",
+                format->nSamplesPerSec);
             logged_mic = true;
         }
     }
@@ -1194,9 +1358,11 @@ Napi::Value VideoAudioStreamerAddon::SetThreadConfig(const Napi::CallbackInfo& i
     m_enableVideoTickThread = info[1].As<Napi::Boolean>().Value();
     m_enableAudioTickThread = info[2].As<Napi::Boolean>().Value();
     
-    fprintf(stderr, "[SetThreadConfig] Capture=%d, VideoTick=%d, AudioTick=%d\n",
-            m_enableCaptureThread, m_enableVideoTickThread, m_enableAudioTickThread);
-    fflush(stderr);
+    IONIA_STREAMER_LOGF(
+        "[SetThreadConfig] Capture=%d, VideoTick=%d, AudioTick=%d\n",
+        m_enableCaptureThread,
+        m_enableVideoTickThread,
+        m_enableAudioTickThread);
     
     return Napi::Boolean::New(info.Env(), true);
 }

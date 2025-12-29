@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstring>
 
+#include "ionia_logging.h"
+
 AudioEngine::AudioEngine()
     : m_desktopFramesAvailable(0)
     , m_micFramesAvailable(0)
@@ -107,9 +109,11 @@ void AudioEngine::FeedAudioData(const float* data, UINT32 numFrames, const char*
     // ARTIFACT DEBUG: Track WASAPI buffer health
     static int capture_callback_count = 0;
     if (capture_callback_count < 20 || capture_callback_count % 100 == 0) {
-        fprintf(stderr, "[WASAPI] %s: %u frames (%.2f ms of audio)\n",
-            source, numFrames, (numFrames * 1000.0f) / SAMPLE_RATE);
-        fflush(stderr);
+        Ionia::LogDebugf(
+            "[WASAPI] %s: %u frames (%.2f ms of audio)\n",
+            source,
+            numFrames,
+            (numFrames * 1000.0f) / SAMPLE_RATE);
     }
     capture_callback_count++;
 
@@ -121,9 +125,10 @@ void AudioEngine::FeedAudioData(const float* data, UINT32 numFrames, const char*
         // ARTIFACT DEBUG: Check for gap between captures
         static UINT32 last_desktop_frames = 0;
         if (last_desktop_frames > 0 && numFrames != last_desktop_frames) {
-            fprintf(stderr, "⚠️ WASAPI DESKTOP: Frame count changed %u → %u\n",
-                last_desktop_frames, numFrames);
-            fflush(stderr);
+            Ionia::LogInfof(
+                "WASAPI DESKTOP: Frame count changed %u -> %u\n",
+                last_desktop_frames,
+                numFrames);
         }
         last_desktop_frames = numFrames;
     } else if (strcmp(source, "mic") == 0) {
@@ -134,9 +139,10 @@ void AudioEngine::FeedAudioData(const float* data, UINT32 numFrames, const char*
         // ARTIFACT DEBUG: Check for gap between captures
         static UINT32 last_mic_frames = 0;
         if (last_mic_frames > 0 && numFrames != last_mic_frames) {
-            fprintf(stderr, "⚠️ WASAPI MIC: Frame count changed %u → %u\n",
-                last_mic_frames, numFrames);
-            fflush(stderr);
+            Ionia::LogInfof(
+                "WASAPI MIC: Frame count changed %u -> %u\n",
+                last_mic_frames,
+                numFrames);
         }
         last_mic_frames = numFrames;
     }
@@ -166,19 +172,21 @@ void AudioEngine::MixAudio(UINT32 numFrames, std::vector<float>& output) {
     if (m_desktopFramesAvailable > maxBufferFrames) {
         UINT32 framesToDrop = m_desktopFramesAvailable - numFrames;  // Keep only 1 frame worth
         UINT32 samplesToDrop = framesToDrop * CHANNELS;
-        fprintf(stderr, "⚠️ DESKTOP BUFFER OVERFLOW: Dropping %u frames to prevent pitch issues\n", framesToDrop);
+        Ionia::LogInfof(
+            "DESKTOP BUFFER OVERFLOW: Dropping %u frames to prevent pitch issues\n",
+            framesToDrop);
         m_desktopBuffer.erase(m_desktopBuffer.begin(), m_desktopBuffer.begin() + samplesToDrop);
         m_desktopFramesAvailable -= framesToDrop;
-        fflush(stderr);
     }
     
     if (m_micFramesAvailable > maxBufferFrames) {
         UINT32 framesToDrop = m_micFramesAvailable - numFrames;
         UINT32 samplesToDrop = framesToDrop * CHANNELS;
-        fprintf(stderr, "⚠️ MIC BUFFER OVERFLOW: Dropping %u frames to prevent pitch issues\n", framesToDrop);
+        Ionia::LogInfof(
+            "MIC BUFFER OVERFLOW: Dropping %u frames to prevent pitch issues\n",
+            framesToDrop);
         m_micBuffer.erase(m_micBuffer.begin(), m_micBuffer.begin() + samplesToDrop);
         m_micFramesAvailable -= framesToDrop;
-        fflush(stderr);
     }
 
     // Step 2: Mix the audio (use what's available, pad with silence if needed)
@@ -276,16 +284,20 @@ void AudioEngine::Tick() {
         // Log buffer state
         static int tick_count = 0;
         if (tick_count < 30 || tick_count % 50 == 0) {
-            fprintf(stderr, "[AudioEngine::Tick] BLOCK MODE: desktop=%u, mic=%u, total=%u (need %u) - %s\n",
-                m_desktopFramesAvailable, m_micFramesAvailable, availableFrames, AAC_FRAME_SIZE,
+            Ionia::LogDebugf(
+                "[AudioEngine::Tick] BLOCK MODE: desktop=%u, mic=%u, total=%u (need %u) - %s\n",
+                m_desktopFramesAvailable,
+                m_micFramesAvailable,
+                availableFrames,
+                AAC_FRAME_SIZE,
                 availableFrames >= AAC_FRAME_SIZE ? "READY" : "PADDING WITH SILENCE");
-            fflush(stderr);
         }
         
         // Warn if buffer is building (WASAPI faster than pull)
         if (availableFrames > AAC_FRAME_SIZE * 10 && tick_count % 20 == 0) {
-            fprintf(stderr, "⚠️ AUDIO BUFFER BUILDING: %u frames (WASAPI delivering faster than we pull)\n", availableFrames);
-            fflush(stderr);
+            Ionia::LogInfof(
+                "AUDIO BUFFER BUILDING: %u frames (WASAPI delivering faster than we pull)\n",
+                availableFrames);
         }
         
         tick_count++;

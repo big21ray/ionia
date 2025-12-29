@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 
+import { debugLog } from '../debugLog';
+
 interface RecordingButtonProps {
   className?: string;
 }
@@ -44,20 +46,20 @@ const RecordingButton = ({ className = '' }: RecordingButtonProps) => {
           // Restore UI state on error
           setIsRecording(true);
         } else {
-          console.log('✅ Recording stopped successfully');
+          debugLog('✅ Recording stopped successfully');
           if (result.outputPath) {
-            console.log(`📁 Saved to: ${result.outputPath}`);
+            debugLog(`📁 Saved to: ${result.outputPath}`);
           }
         }
       } else {
         // Start recording
         const result = await window.electronAPI?.startRecording();
-        console.log('Recording result:', result);
+        debugLog('Recording result:', result);
         if (result?.success) {
           setIsRecording(true);
         } else {
           console.error('Failed to start recording:', result);
-          const errorMsg = result?.error || result?.message || 'Unknown error. Check console for details.';
+          const errorMsg = result?.error || 'Unknown error. Check console for details.';
           alert(`Failed to start recording: ${errorMsg}`);
         }
       }

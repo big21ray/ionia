@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 
+import { debugLog } from '../debugLog';
+
 interface StreamButtonProps {
   className?: string;
 }
@@ -44,7 +46,7 @@ const StreamButton = ({ className = '' }: StreamButtonProps) => {
           // Restore UI state on error
           setIsStreaming(true);
         } else {
-          console.log('✅ Streaming stopped successfully');
+          debugLog('✅ Streaming stopped successfully');
         }
       } else {
         // Start streaming with hardcoded YouTube stream key
@@ -53,12 +55,12 @@ const StreamButton = ({ className = '' }: StreamButtonProps) => {
 
         // Start streaming
         const result = await window.electronAPI?.startStream(rtmpUrl);
-        console.log('Streaming result:', result);
+        debugLog('Streaming result:', result);
         if (result?.success) {
           setIsStreaming(true);
         } else {
           console.error('Failed to start streaming:', result);
-          const errorMsg = result?.error || result?.message || 'Unknown error. Check console for details.';
+          const errorMsg = result?.error || 'Unknown error. Check console for details.';
           alert(`Failed to start streaming: ${errorMsg}`);
         }
       }

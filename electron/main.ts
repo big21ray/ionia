@@ -4,6 +4,8 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { createRequire } from 'module';
 
+import { DEBUG_LOGS, debugLog, debugWarn } from './debugLog.js';
+
 const require = createRequire(import.meta.url);
 
 const __filename = fileURLToPath(import.meta.url);
@@ -27,26 +29,32 @@ try {
     const currentPath = process.env.PATH || '';
     if (!currentPath.includes(dllPath)) {
       process.env.PATH = `${dllPath};${currentPath}`;
-      console.log('📁 Added DLL path to PATH:', dllPath);
+      debugLog('📁 Added DLL path to PATH:', dllPath);
     }
   } else {
-    console.warn('⚠️ DLL directory not found:', dllPath);
+    debugWarn('⚠️ DLL directory not found:', dllPath);
   }
   
   const nativeModule = require(path.join(nativeAudioPath, 'index.js'));
+
+  // Single toggle controls native verbosity too.
+  if (typeof nativeModule?.setDebugLogging === 'function') {
+    nativeModule.setDebugLogging(DEBUG_LOGS);
+  }
+
   VideoAudioRecorder = nativeModule.VideoAudioRecorder;
   VideoAudioStreamer = nativeModule.VideoAudioStreamer;
-  console.log('✅ Native module loaded successfully from:', nativeAudioPath);
-  console.log('📦 Available exports:', Object.keys(nativeModule));
+  debugLog('✅ Native module loaded successfully from:', nativeAudioPath);
+  debugLog('📦 Available exports:', Object.keys(nativeModule));
   if (VideoAudioRecorder) {
-    console.log('✅ VideoAudioRecorder native module loaded successfully');
+    debugLog('✅ VideoAudioRecorder native module loaded successfully');
   } else {
     console.error('❌ VideoAudioRecorder is null/undefined in native module');
     console.error('Available exports:', Object.keys(nativeModule));
   }
 
   if (VideoAudioStreamer) {
-    console.log('✅ VideoAudioStreamer native module loaded successfully');
+    debugLog('✅ VideoAudioStreamer native module loaded successfully');
   } else {
     console.error('❌ VideoAudioStreamer is null/undefined in native module');
   }
@@ -123,31 +131,31 @@ const createWindow = () => {
         ? path.join(__dirname, '../../native-audio')
         : path.join(process.resourcesPath || __dirname, 'native-audio');
       const dllPath = path.join(debugNativeAudioPath, 'build/Release');
-      console.log('🔍 Debug: DLL path:', dllPath);
-      console.log('🔍 Debug: DLL path exists:', fs.existsSync(dllPath));
+      debugLog('🔍 Debug: DLL path:', dllPath);
+      debugLog('🔍 Debug: DLL path exists:', fs.existsSync(dllPath));
       if (fs.existsSync(dllPath)) {
         const dlls = fs.readdirSync(dllPath).filter((f: string) => f.endsWith('.dll'));
-        console.log('🔍 Debug: Found DLLs:', dlls.length, 'files');
+        debugLog('🔍 Debug: Found DLLs:', dlls.length, 'files');
         const requiredDlls = ['avcodec.dll', 'avformat.dll', 'avutil.dll', 'swresample.dll'];
         for (const dll of requiredDlls) {
           const exists = fs.existsSync(path.join(dllPath, dll));
-          console.log(`🔍 Debug: ${dll}: ${exists ? '✅' : '❌'}`);
+          debugLog(`🔍 Debug: ${dll}: ${exists ? '✅' : '❌'}`);
         }
       }
 
       // Create VideoAudioRecorder instance
-      console.log('🎬 Creating VideoAudioRecorder instance...');
+      debugLog('🎬 Creating VideoAudioRecorder instance...');
       videoAudioRecorder = new VideoAudioRecorder();
 
       // Initialize recorder
       // Parameters: outputPath, fps (optional, default 30), videoBitrate (optional, default 5000000), 
       //             useNvenc (optional, default true), audioBitrate (optional, default 192000),
       //             audioMode (optional, default "both" - can be "mic", "desktop", or "both")
-      console.log('🔧 Initializing recorder...');
-      console.log(`   Output: ${recordingOutputPath}`);
-      console.log(`   Settings: 30fps, 5Mbps video, NVENC=true, 192kbps audio, mode=both`);
-      console.log('⚠️  IMPORTANT: Check the console ABOVE for C++ error messages starting with [VideoEncoder]');
-      console.log('⚠️  These messages appear BEFORE the JavaScript exception and show the real error!');
+      debugLog('🔧 Initializing recorder...');
+      debugLog(`   Output: ${recordingOutputPath}`);
+      debugLog(`   Settings: 30fps, 5Mbps video, NVENC=true, 192kbps audio, mode=both`);
+      debugLog('⚠️  IMPORTANT: Check the console ABOVE for C++ error messages starting with [VideoEncoder]');
+      debugLog('⚠️  These messages appear BEFORE the JavaScript exception and show the real error!');
       
       let initialized: boolean;
       try {
@@ -178,10 +186,10 @@ const createWindow = () => {
         recordingOutputPath = null;
         return { success: false, error: 'Failed to initialize recorder. Check Electron console for C++ error details (look for [VideoEncoder] messages).' };
       }
-      console.log('✅ Recorder initialized');
+      debugLog('✅ Recorder initialized');
 
       // Start recording
-      console.log('▶️  Starting recording...');
+      debugLog('▶️  Starting recording...');
       let started: boolean;
       try {
         started = videoAudioRecorder.start();
@@ -198,8 +206,8 @@ const createWindow = () => {
         recordingOutputPath = null;
         return { success: false, error: 'Failed to start recording' };
       }
-      console.log('✅ Recording started');
-      console.log(`📁 Output: ${recordingOutputPath}`);
+      debugLog('✅ Recording started');
+      debugLog(`📁 Output: ${recordingOutputPath}`);
 
       return { success: true, outputPath: recordingOutputPath };
     } catch (error) {
@@ -221,7 +229,7 @@ const createWindow = () => {
       const recorderToStop = videoAudioRecorder;
       
       // Stop recording
-      console.log('⏹️  Stopping recording...');
+      debugLog('⏹️  Stopping recording...');
       const stopped = recorderToStop.stop();
       
       if (!stopped) {
@@ -230,7 +238,7 @@ const createWindow = () => {
         recordingOutputPath = null;
         return { success: false, error: 'Failed to stop recording' };
       }
-      console.log('✅ Recording stopped');
+      debugLog('✅ Recording stopped');
 
       // Clear the reference
       videoAudioRecorder = null;
@@ -242,24 +250,24 @@ const createWindow = () => {
 
       // Get final statistics
       const finalStats = recorderToStop.getStatistics();
-      console.log('📊 Final Statistics:');
-      console.log(`   Video Frames Captured: ${finalStats.videoFramesCaptured}`);
-      console.log(`   Video Packets Encoded: ${finalStats.videoPacketsEncoded}`);
-      console.log(`   Audio Packets Encoded: ${finalStats.audioPacketsEncoded}`);
-      console.log(`   Video Packets Muxed: ${finalStats.videoPacketsMuxed}`);
-      console.log(`   Audio Packets Muxed: ${finalStats.audioPacketsMuxed}`);
-      console.log(`   Total Bytes: ${finalStats.totalBytes} (${(finalStats.totalBytes / 1024 / 1024).toFixed(2)} MB)`);
+      debugLog('📊 Final Statistics:');
+      debugLog(`   Video Frames Captured: ${finalStats.videoFramesCaptured}`);
+      debugLog(`   Video Packets Encoded: ${finalStats.videoPacketsEncoded}`);
+      debugLog(`   Audio Packets Encoded: ${finalStats.audioPacketsEncoded}`);
+      debugLog(`   Video Packets Muxed: ${finalStats.videoPacketsMuxed}`);
+      debugLog(`   Audio Packets Muxed: ${finalStats.audioPacketsMuxed}`);
+      debugLog(`   Total Bytes: ${finalStats.totalBytes} (${(finalStats.totalBytes / 1024 / 1024).toFixed(2)} MB)`);
 
       // Verify file exists and is valid
       if (finalOutputPath && fs.existsSync(finalOutputPath)) {
         const stats = fs.statSync(finalOutputPath);
         const fileSizeMB = (stats.size / 1024 / 1024).toFixed(2);
-        console.log(`📁 Recording file size: ${fileSizeMB} MB`);
+        debugLog(`📁 Recording file size: ${fileSizeMB} MB`);
         
         if (stats.size > 1024) {
-          console.log('✅ Recording file appears to be valid');
-          console.log(`\n🎉 Recording finished successfully!`);
-          console.log(`📂 Saved to: ${finalOutputPath}\n`);
+          debugLog('✅ Recording file appears to be valid');
+          debugLog(`\n🎉 Recording finished successfully!`);
+          debugLog(`📂 Saved to: ${finalOutputPath}\n`);
           return { success: true, outputPath: finalOutputPath };
         } else {
           console.error('❌ Recording file is too small (likely incomplete):', stats.size, 'bytes');
@@ -297,13 +305,13 @@ const createWindow = () => {
 
     try {
       streamingRtmpUrl = rtmpUrl.trim();
-      console.log('📡 Starting stream to:', streamingRtmpUrl);
+      debugLog('📡 Starting stream to:', streamingRtmpUrl);
 
-      console.log('🎥 Creating VideoAudioStreamer instance...');
+      debugLog('🎥 Creating VideoAudioStreamer instance...');
       videoAudioStreamer = new VideoAudioStreamer();
 
-      console.log('🔧 Initializing streamer...');
-      console.log('   Settings: 30fps, 5Mbps video, NVENC=true, 192kbps audio, mode=both');
+      debugLog('🔧 Initializing streamer...');
+      debugLog('   Settings: 30fps, 5Mbps video, NVENC=true, 192kbps audio, mode=both');
       let initialized: boolean;
       try {
         initialized = videoAudioStreamer.initialize(streamingRtmpUrl, 30, 5000000, true, 192000, 'both');
@@ -322,7 +330,7 @@ const createWindow = () => {
         return { success: false, error: 'Failed to initialize stream. Check Electron console for C++ error details.' };
       }
 
-      console.log('▶️  Starting stream...');
+      debugLog('▶️  Starting stream...');
       let started: boolean;
       try {
         started = videoAudioStreamer.start();
@@ -340,7 +348,7 @@ const createWindow = () => {
         return { success: false, error: 'Failed to start stream' };
       }
 
-      console.log('✅ Streaming started');
+      debugLog('✅ Streaming started');
       return { success: true, rtmpUrl: streamingRtmpUrl };
     } catch (error) {
       console.error('❌ Error during stream start:', error);
@@ -360,7 +368,7 @@ const createWindow = () => {
       const streamerToStop = videoAudioStreamer;
       const rtmpUrl = streamingRtmpUrl;
       
-      console.log('⏹️  Stopping stream...');
+      debugLog('⏹️  Stopping stream...');
 
       let stopped: boolean;
       try {
@@ -382,7 +390,7 @@ const createWindow = () => {
       videoAudioStreamer = null;
       streamingRtmpUrl = null;
       
-      console.log('✅ Stream stopped');
+      debugLog('✅ Stream stopped');
       return { success: true, rtmpUrl };
     } catch (error) {
       console.error('❌ Error during stream stop:', error);
