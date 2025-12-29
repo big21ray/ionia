@@ -1,4 +1,8 @@
-# Ionia: Video/Audio Recorder/Streamer Engine - Architecture Overview
+# Ionia: Video/Audio Recorder/Streamer Engine - Architecture Overview (Canonical)
+
+This document is the source of truth for how the native engine works today.
+
+- Debugging guide: [STREAMER_DEBUG.md](STREAMER_DEBUG.md)
 
 ## 🎯 Project Summary
 **Ionia** is an Electron-based desktop application with a native C++ recording and streaming engine. It captures desktop video + audio and can:
@@ -75,6 +79,36 @@
 
 ---
 
+      ## 🧵 Native thread model (how it runs today)
+
+      JS/Electron creates the addon and calls `initialize()` / `start()` / `stop()`. Cadence is driven natively (not by “JS calls Tick every 10ms”).
+
+      ```
+      ┌─────────────────────────────────────────────────────────────────────────────┐
+      │ JS (Node/Electron)                                                         │
+      │ - Creates VideoAudioStreamer / VideoAudioRecorder                           │
+      │ - Calls initialize() / start() / stop()                                     │
+      └─────────────────────────────────────────────────────────────────────────────┘
+                  │
+                  ▼
+      ┌─────────────────────────────────────────────────────────────────────────────┐
+      │ Native addon (streamer/recorder)                                            │
+      │ Spawns threads roughly like:                                                │
+      │  1) CaptureThread: DesktopDuplication + WASAPI capture callbacks             │
+      │  2) VideoTickThread: CFR video pacing (fps) + encoding                       │
+      │  3) AudioTickThread: AAC cadence (1024 @ 48kHz) + mix + encoding             │
+      │  4) (Streamer) NetworkSendThread: muxer flush/pacing + backpressure          │
+      └─────────────────────────────────────────────────────────────────────────────┘
+      ```
+
+      ### Muxing rules (must stay true)
+
+      - Don’t inject hand-built FLV tags. Provide codec extradata and raw codec packets.
+      - Respect post-header `AVStream::time_base` (FFmpeg can adjust it after header write).
+      - Use `av_interleaved_write_frame()`.
+      - Ensure stable ordering between audio/video (avoid timestamp ties).
+      - Pace network sending based on DTS vs wall clock.
+
 ## 🔌 Component Deep Dive
 
 ### 1. **DesktopDuplication** (DXGI Capture)
@@ -135,56 +169,34 @@ Microphone (native format)        →  ConvertToFloat32()  →  Resample(48kHz) 
 ### 3. **AudioEngine** (Clock Master - OBS-like)
 **File:** [native-audio/src/audio_engine.h/cpp](native-audio/src/audio_engine.h)
 
-**Purpose:** Acts as the **timing master** for the entire pipeline. Uses a monotonic clock to maintain sync.
+**Purpose:** Produces a stable, streaming-friendly audio timeline: mixes desktop + mic and emits audio in AAC-friendly framing.
 
 **Key Concepts:**
-- **Monotonic Clock:** Uses `QueryPerformanceCounter` (high-resolution Windows timer)
-- **Frame Counting:** Tracks frames sent in 48kHz units
-- **Non-blocking mixing:** Always produces output, uses silence if data missing
+- **Fixed AAC framing:** AAC-LC wants 1024 samples per frame; emitting fixed-size blocks avoids encoder buffering drift.
+- **Non-blocking mixing:** If inputs are short, the engine pads with silence to keep cadence stable.
+- **Source-driven cadence:** The engine emits output in consistent blocks, not variable-sized “whatever elapsed time suggests”.
 
-**How AudioEngine works:**
+**How AudioEngine works (high level):**
 
-1. **Initialization:**
-   ```cpp
-   engine.Initialize(callback);  // Register callback
-   engine.Start();               // Start monotonic clock (m_startTimeMs = now)
-   ```
-
-2. **Feed Audio Data:**
+1. **Feed Audio Data (from WASAPI callbacks):**
    ```cpp
    AudioCapture → engine.FeedAudioData(data, frames, "desktop");
    AudioCapture → engine.FeedAudioData(data, frames, "mic");
-   // Data is buffered (thread-safe with mutex)
+   // Data is buffered (thread-safe)
    ```
 
-3. **Tick() - Called every ~10ms from JavaScript:**
+2. **Tick() emits exactly one AAC frame worth of samples:**
    ```cpp
-   void AudioEngine::Tick() {
-       // Calculate elapsed time since start
-       currentTime = GetMonotonicTimeMs();
-       elapsedMs = currentTime - m_startTimeMs;
-       
-       // How many frames SHOULD we have sent by now?
-       expectedFrames = (elapsedMs * 48000) / 1000;
-       
-       // How many frames are missing?
-       framesToSend = expectedFrames - m_framesSent;
-       
-       // Clamp to max 100ms per tick
-       outputFrames = min(framesToSend, 4800);
-       
-       // Mix audio from buffers (OBS-like: non-blocking)
-       MixAudio(outputFrames, output);
-       
-       // Create AudioPacket with explicit PTS
-       packet = CreatePacket(output, outputFrames, m_framesSent);
-       
-       // Send to callback (→ AudioEncoder)
-       m_callback(packet);
-       
-       m_framesSent += outputFrames;
-   }
+   // Conceptual: the tick produces a fixed 1024-sample block
+   const uint32_t AAC_FRAME = 1024;
+   MixAudio(AAC_FRAME, output, /*silencePadIfShort=*/true);
+   callback(output, /*ptsInFrames=*/framesSent);
+   framesSent += AAC_FRAME;
    ```
+
+3. **Scheduling:**
+   - The native addon drives tick cadence using a monotonic clock (`steady_clock` + `sleep_until`) with bounded catch-up.
+   - Reason: Windows sleep granularity can drift; `sleep_until` keeps long-term cadence stable.
 
 4. **Mixing Logic:**
    ```cpp
@@ -268,9 +280,8 @@ Combines video + audio into MP4 file with proper timestamping.
 **File:** [native-audio/src/stream_muxer.h/cpp](native-audio/src/stream_muxer.h)
 
 Combines video + audio for RTMP streaming. Adds:
-- Backpressure detection (buffer full → drop video frames)
-- RTMP connection status
-- Reconnect logic
+- Backpressure detection (buffer full → drop policy)
+- Packet buffering + paced sending
 
 **Muxing process:**
 ```cpp
@@ -290,11 +301,10 @@ muxer.WriteAudioPacket(encoded_bytes, ptsFrames);
 
 **Key Formula:**
 ```cpp
-// PTS = Presentation Time Stamp (when to display the frame)
-pts = frameIndex;  // For video: frame numbers
-pts = sampleIndex / 48000;  // For audio: in seconds
-
-// Then av_interleaved_write_frame() handles interleaving and actual writing
+// High level:
+// - Video timestamps are derived from frame index in a {1,fps} domain.
+// - Audio timestamps are derived from sample frames in a {1,48000} domain.
+// - Packets are rescaled into the muxer's stream time_base and written interleaved.
 ```
 
 ---
@@ -312,8 +322,8 @@ JavaScript (Electron)
   ├─ Thread 2: AudioCaptureThread (Desktop + Mic)
   │   AudioCapture → WASAPI callbacks
   │
-  ├─ Thread 3: AudioTickThread (10ms timer)
-  │   AudioEngine.Tick() → AudioEncoder → VideoMuxer
+   ├─ Thread 3: AudioTickThread (1024-sample cadence)
+   │   AudioEngine.Tick() → AudioEncoder → VideoMuxer
   │
   └─ Main: JavaScript Initialization & Control
       Start/Stop/GetStats
@@ -371,11 +381,9 @@ JavaScript (Electron)
 4. **AudioTickThread Loop:**
    ```cpp
    while (running) {
-       // Every 10ms
-       sleep(10ms);
-       
-       // AudioEngine calculates expected frames
-       AudioEngine.Tick();
+      // Cadence is aligned to AAC framing (1024 samples @ 48kHz ≈ 21.33ms)
+      // Actual scheduling uses a monotonic clock + sleep_until.
+      AudioEngine.Tick();
        
        // AudioEngine callback:
        // → AudioEncoder.EncodeFrames(pcmData)
@@ -395,13 +403,12 @@ JavaScript (Electron)
 
 ---
 
-## 🌐 Streaming Flow (VideoAudioStreamer - Planned)
-**File:** [native-audio/src/wasapi_video_audio_streamer.cpp](native-audio/src/wasapi_video_audio_streamer.cpp) (not yet implemented, schema in docs)
+## 🌐 Streaming Flow (VideoAudioStreamer)
+**File:** [native-audio/src/wasapi_video_audio_streamer.cpp](native-audio/src/wasapi_video_audio_streamer.cpp)
 
-### New Components:
-1. **StreamBuffer:** Queues packets to handle network latency
-2. **NetworkSendThread:** Dequeues packets and sends via RTMP
-3. **ReconnectThread:** Handles RTMP disconnections
+### Streaming-specific components
+1. **StreamBuffer:** Queues packets to handle network latency/backpressure
+2. **NetworkSendThread:** Dequeues buffered packets and writes them to RTMP (paced)
 
 ### Backpressure Handling:
 ```
@@ -421,7 +428,7 @@ When buffer clears:
 
 ### Key Principle: **PTS (Presentation Time Stamp)**
 
-All timing is driven by **frame/sample counts**, not wall-clock time:
+All timestamps are derived from **frame/sample counts**, and then written using FFmpeg stream time bases.
 
 **Video PTS:**
 ```
@@ -437,32 +444,14 @@ sampleIndex 1 → PTS = 1 / 48000 = 20.8 µs
 sampleIndex N → PTS = N / 48000
 ```
 
-**In FFmpeg:**
-```cpp
-// Video
-avPacket->pts = frameIndex;  // Frame number
-avPacket->stream->time_base = {1, fps};  // Interpret as frame time
-
-// Audio  
-avPacket->pts = sampleIndex;  // Sample number
-avPacket->stream->time_base = {1, 48000};  // Interpret as audio time
-```
-
-**FFmpeg's av_interleaved_write_frame() then:**
-1. Converts both to common time base (e.g., microseconds)
-2. Interleaves packets by PTS
-3. Ensures A/V sync
+**In FFmpeg (conceptually):**
+- Video packets start in a {1,fps} domain (frame index), then are rescaled to the muxer's `AVStream::time_base`.
+- Audio packets start in a {1,48000} domain (sample frames), then are rescaled to the muxer's `AVStream::time_base`.
+- `av_interleaved_write_frame()` is used so FFmpeg can interleave correctly.
 
 ---
 
 ## 🛠️ Key Implementation Details
-
-### **Monotonic Clock (AudioEngine)**
-```cpp
-// Uses high-performance counter for smooth, monotonic timing
-QueryPerformanceCounter() → converts to milliseconds
-// Alternative fallback: GetTickCount64()
-```
 
 ### **Thread Safety**
 ```cpp
@@ -480,20 +469,11 @@ For 1 second of stereo audio:
   48000 frames × 2 channels × 4 bytes (float32) = 384 KB
 ```
 
-### **H.264 Codec Selection**
-```cpp
-// Electron runs in COM STA mode
-// Some codecs require MTA mode
+### **H.264 codec selection and COM**
 
-comMode = detect_com_mode();
-if (comMode == STA) {
-    // h264_mf (Media Foundation) will fail → use libx264
-    videoEncoder.Initialize(..., useNvenc=false, comInSTAMode=true);
-} else {
-    // MTA mode → can use NVENC or x264
-    videoEncoder.Initialize(..., useNvenc=true);
-}
-```
+Electron can run with COM initialized in STA mode. Some Media Foundation-based encoders can require MTA.
+
+If you see COM-mode errors during encoder init, prefer selecting an encoder that doesn’t depend on that COM mode (for example, `libx264` if present in your FFmpeg build). See [STREAMER_DEBUG.md](STREAMER_DEBUG.md).
 
 ---
 
@@ -516,14 +496,11 @@ if (comMode == STA) {
 - Video encoding (H.264 via NVENC/x264)
 - Audio encoding (AAC)
 - Video + Audio recording to MP4
-- Audio synchronization via monotonic clock
-- COM mode detection for codec selection
+- RTMP streaming (FLV)
+- Streaming backpressure buffering / drop policy
 
-### 🚧 Next Steps
-- Streaming to RTMP (StreamMuxer + StreamBuffer)
-- Backpressure handling for streaming
-- Reconnect logic for dropped connections
-- UI improvements (Stream button, settings)
+### 🚧 Remaining work (high level)
+- Improve reconnect behavior and failure reporting (implementation-specific)
 
 ---
 

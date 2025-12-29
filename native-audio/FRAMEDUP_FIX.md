@@ -96,7 +96,11 @@ if (currentFrame < expectedFrame) {
 
 ## Testing
 
-Run: `node test_framedup_fix.js`
+Run (preferred): `..\\run_streamer_debug.cmd <youtubeStreamKey>`
+
+Or run directly:
+
+`node test_stream_youtube_end_to_end.js <youtubeStreamKey>`
 
 Expected output:
 ```

@@ -51,6 +51,7 @@ Desktop.ini
 # Logs
 logs/
 *.log
+*.txt
 
 # Database
 *.db

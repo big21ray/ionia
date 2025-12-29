@@ -47,14 +47,12 @@ const StreamButton = ({ className = '' }: StreamButtonProps) => {
           console.log('✅ Streaming stopped successfully');
         }
       } else {
-        // Prompt for RTMP URL
-        const rtmpUrl = prompt('Enter RTMP URL (e.g., rtmp://live.twitch.tv/app/STREAM_KEY):');
-        if (!rtmpUrl || rtmpUrl.trim() === '') {
-          return; // User cancelled
-        }
+        // Start streaming with hardcoded YouTube stream key
+        const streamKey = '3avj-5j6r-utec-qp7m-86hq';
+        const rtmpUrl = `rtmp://a.rtmp.youtube.com/live2/${streamKey}`;
 
         // Start streaming
-        const result = await window.electronAPI?.startStream(rtmpUrl.trim());
+        const result = await window.electronAPI?.startStream(rtmpUrl);
         console.log('Streaming result:', result);
         if (result?.success) {
           setIsStreaming(true);
@@ -83,7 +81,7 @@ const StreamButton = ({ className = '' }: StreamButtonProps) => {
           ? 'bg-purple-600 hover:bg-purple-700 text-white'
           : 'bg-gray-700 hover:bg-gray-600 text-gray-200'
       } ${className}`}
-      title={isStreaming ? 'Stop streaming' : 'Start streaming (RTMP)'}
+      title={isStreaming ? 'Stop streaming' : 'Start streaming (YouTube)'}
     >
       <div
         className={`w-3 h-3 rounded-full ${

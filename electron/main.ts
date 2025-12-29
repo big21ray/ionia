@@ -11,6 +11,7 @@ const __dirname = path.dirname(__filename);
 
 // Load native VideoAudioRecorder module
 let VideoAudioRecorder: any = null;
+let VideoAudioStreamer: any = null;
 try {
   // In development, __dirname points to dist-electron/electron
   // In production, it points to the packaged electron folder
@@ -34,6 +35,7 @@ try {
   
   const nativeModule = require(path.join(nativeAudioPath, 'index.js'));
   VideoAudioRecorder = nativeModule.VideoAudioRecorder;
+  VideoAudioStreamer = nativeModule.VideoAudioStreamer;
   console.log('✅ Native module loaded successfully from:', nativeAudioPath);
   console.log('📦 Available exports:', Object.keys(nativeModule));
   if (VideoAudioRecorder) {
@@ -41,6 +43,12 @@ try {
   } else {
     console.error('❌ VideoAudioRecorder is null/undefined in native module');
     console.error('Available exports:', Object.keys(nativeModule));
+  }
+
+  if (VideoAudioStreamer) {
+    console.log('✅ VideoAudioStreamer native module loaded successfully');
+  } else {
+    console.error('❌ VideoAudioStreamer is null/undefined in native module');
   }
 } catch (error) {
   console.error('❌ Failed to load native module:', error);
@@ -279,8 +287,8 @@ const createWindow = () => {
       return { success: false, error: 'Recording in progress. Stop recording before starting stream.' };
     }
 
-    if (!VideoAudioRecorder) {
-      return { success: false, error: 'VideoAudioRecorder not available. Make sure the native module is compiled.' };
+    if (!VideoAudioStreamer) {
+      return { success: false, error: 'VideoAudioStreamer not available. Make sure the native module is compiled.' };
     }
 
     if (!rtmpUrl || rtmpUrl.trim() === '') {
@@ -291,26 +299,49 @@ const createWindow = () => {
       streamingRtmpUrl = rtmpUrl.trim();
       console.log('📡 Starting stream to:', streamingRtmpUrl);
 
-      // TODO: Create VideoAudioStreamer wrapper that uses StreamMuxer instead of VideoMuxer
-      // For now, return an error indicating it's not yet implemented
-      return { 
-        success: false, 
-        error: 'Streaming not yet implemented. StreamMuxer C++ class is ready, but N-API wrapper needs to be created.' 
-      };
+      console.log('🎥 Creating VideoAudioStreamer instance...');
+      videoAudioStreamer = new VideoAudioStreamer();
 
-      // Future implementation will look like:
-      // videoAudioStreamer = new VideoAudioRecorder();
-      // const initialized = videoAudioStreamer.initializeStream(streamingRtmpUrl, 30, 5000000, true, 192000, 'both');
-      // if (!initialized) {
-      //   streamingRtmpUrl = null;
-      //   return { success: false, error: 'Failed to initialize stream' };
-      // }
-      // const started = videoAudioStreamer.start();
-      // if (!started) {
-      //   streamingRtmpUrl = null;
-      //   return { success: false, error: 'Failed to start stream' };
-      // }
-      // return { success: true, rtmpUrl: streamingRtmpUrl };
+      console.log('🔧 Initializing streamer...');
+      console.log('   Settings: 30fps, 5Mbps video, NVENC=true, 192kbps audio, mode=both');
+      let initialized: boolean;
+      try {
+        initialized = videoAudioStreamer.initialize(streamingRtmpUrl, 30, 5000000, true, 192000, 'both');
+      } catch (initError: any) {
+        console.error('❌ Exception during VideoAudioStreamer initialization:', initError);
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        const errorMsg = initError?.message || String(initError);
+        return { success: false, error: `Failed to initialize stream: ${errorMsg}` };
+      }
+
+      if (!initialized) {
+        console.error('❌ Failed to initialize stream (returned false)');
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        return { success: false, error: 'Failed to initialize stream. Check Electron console for C++ error details.' };
+      }
+
+      console.log('▶️  Starting stream...');
+      let started: boolean;
+      try {
+        started = videoAudioStreamer.start();
+      } catch (startError: any) {
+        console.error('❌ Exception during VideoAudioStreamer start:', startError);
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        return { success: false, error: `Failed to start stream: ${startError?.message || startError}` };
+      }
+
+      if (!started) {
+        console.error('❌ Failed to start stream (returned false)');
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        return { success: false, error: 'Failed to start stream' };
+      }
+
+      console.log('✅ Streaming started');
+      return { success: true, rtmpUrl: streamingRtmpUrl };
     } catch (error) {
       console.error('❌ Error during stream start:', error);
       videoAudioStreamer = null;
@@ -330,12 +361,23 @@ const createWindow = () => {
       const rtmpUrl = streamingRtmpUrl;
       
       console.log('⏹️  Stopping stream...');
-      
-      // TODO: Implement stop for streaming
-      // const stopped = streamerToStop.stop();
-      // if (!stopped) {
-      //   return { success: false, error: 'Failed to stop stream' };
-      // }
+
+      let stopped: boolean;
+      try {
+        stopped = streamerToStop.stop();
+      } catch (stopError: any) {
+        console.error('❌ Exception during VideoAudioStreamer stop:', stopError);
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        return { success: false, error: `Failed to stop stream: ${stopError?.message || stopError}` };
+      }
+
+      if (!stopped) {
+        console.error('❌ Failed to stop stream (returned false)');
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        return { success: false, error: 'Failed to stop stream' };
+      }
       
       videoAudioStreamer = null;
       streamingRtmpUrl = null;
