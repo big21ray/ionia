@@ -1,0 +1,22 @@
+{
+  "name": "wasapi-capture",
+  "version": "1.0.0",
+  "description": "Native WASAPI audio capture for Windows",
+  "main": "index.js",
+  "gypfile": true,
+  "scripts": {
+    "install": "node-gyp rebuild"
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+

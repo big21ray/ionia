@@ -8,9 +8,16 @@ lerna-debug.log*
 
 # Build outputs
 dist/
+dist-electron/
 build/
 out/
 *.tsbuildinfo
+*.obj
+*.pdb
+*.exp
+*.lib
+*.iobj
+*.ipdb
 
 # Electron
 *.asar
@@ -44,6 +51,7 @@ Desktop.ini
 # Logs
 logs/
 *.log
+*.txt
 
 # Database
 *.db
@@ -90,3 +98,29 @@ ffmpeg.exe
 thumbnails/
 .cache/
 
+# Video files (should not be committed to git)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.m4v
+
+# Audio debug/output files (should not be committed to git)
+*.wav
+*.aac
+node_modules
+
+# PowerShell diagnostic scripts (keep local, don't commit)
+*.ps1
+
+# Development startup scripts (use npm run electron:dev instead)
+start-dev.bat
+start-dev.ps1
+
+# Configuration files with sensitive data (RTMP keys, API keys, etc.)
+native-audio/config.json
+config.json
+*.config.json

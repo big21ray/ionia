@@ -1,0 +1,580 @@
+import { app, BrowserWindow, dialog, ipcMain, protocol } from 'electron';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
+import { createRequire } from 'module';
+
+import { DEBUG_LOGS, debugLog, debugWarn } from './debugLog.js';
+
+const require = createRequire(import.meta.url);
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const IONIA_VIDEO_SCHEME = 'ionia-video';
+
+// Must be called before app is ready.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: IONIA_VIDEO_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+]);
+
+let ioniaVideoProtocolRegistered = false;
+
+const normalizeRequestedVideoPath = (rawPathOrUrl: string): string | null => {
+  const trimmed = (rawPathOrUrl || '').trim();
+  if (!trimmed) return null;
+
+  // Renderer may pass either a Windows path (C:\...) or a file:// URL.
+  if (trimmed.startsWith('file://')) {
+    try {
+      const url = new URL(trimmed);
+      let pathname = decodeURIComponent(url.pathname);
+      // On Windows, file URL paths often look like /C:/Users/...
+      if (process.platform === 'win32' && pathname.startsWith('/')) {
+        pathname = pathname.slice(1);
+      }
+      return path.normalize(pathname);
+    } catch {
+      return null;
+    }
+  }
+
+  return path.normalize(trimmed);
+};
+
+const guessVideoMimeType = (filePath: string): string => {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.mp4':
+      return 'video/mp4';
+    case '.webm':
+      return 'video/webm';
+    case '.ogg':
+    case '.ogv':
+      return 'video/ogg';
+    case '.mov':
+      return 'video/quicktime';
+    case '.mkv':
+      return 'video/x-matroska';
+    case '.avi':
+      return 'video/x-msvideo';
+    case '.wmv':
+      return 'video/x-ms-wmv';
+    case '.flv':
+      return 'video/x-flv';
+    case '.m4v':
+      return 'video/x-m4v';
+    default:
+      return 'application/octet-stream';
+  }
+};
+
+const registerIoniaVideoProtocol = () => {
+  if (ioniaVideoProtocolRegistered) return;
+  ioniaVideoProtocolRegistered = true;
+
+  protocol.registerStreamProtocol(IONIA_VIDEO_SCHEME, (request, callback) => {
+    try {
+      const url = new URL(request.url);
+      const rawPathOrUrl = url.searchParams.get('path') || '';
+      const requestedPath = normalizeRequestedVideoPath(rawPathOrUrl);
+      if (!requestedPath || !path.isAbsolute(requestedPath)) {
+        callback({ statusCode: 400, data: null as any });
+        return;
+      }
+
+      if (!fs.existsSync(requestedPath)) {
+        callback({ statusCode: 404, data: null as any });
+        return;
+      }
+
+      const stat = fs.statSync(requestedPath);
+      if (!stat.isFile()) {
+        callback({ statusCode: 404, data: null as any });
+        return;
+      }
+
+      const totalSize = stat.size;
+      const mimeType = guessVideoMimeType(requestedPath);
+
+      const headers: Record<string, string> = {
+        'Content-Type': mimeType,
+        'Accept-Ranges': 'bytes',
+      };
+
+      const rangeHeader =
+        (request.headers?.Range as string | undefined) ||
+        (request.headers?.range as string | undefined);
+
+      if (rangeHeader) {
+        const match = /^bytes=(\d*)-(\d*)$/i.exec(rangeHeader);
+        if (!match) {
+          callback({ statusCode: 416, headers, data: null as any });
+          return;
+        }
+
+        const start = match[1] ? Number(match[1]) : 0;
+        const end = match[2] ? Number(match[2]) : totalSize - 1;
+
+        if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= totalSize) {
+          callback({ statusCode: 416, headers, data: null as any });
+          return;
+        }
+
+        const clampedEnd = Math.min(end, totalSize - 1);
+        const chunkSize = clampedEnd - start + 1;
+
+        headers['Content-Range'] = `bytes ${start}-${clampedEnd}/${totalSize}`;
+        headers['Content-Length'] = String(chunkSize);
+
+        const stream = fs.createReadStream(requestedPath, { start, end: clampedEnd });
+        callback({ statusCode: 206, headers, data: stream as any });
+        return;
+      }
+
+      headers['Content-Length'] = String(totalSize);
+      const stream = fs.createReadStream(requestedPath);
+      callback({ statusCode: 200, headers, data: stream as any });
+    } catch (error) {
+      console.error('❌ ionia-video protocol error:', error);
+      callback({ statusCode: 500, data: null as any });
+    }
+  });
+};
+
+// Load native VideoAudioRecorder module
+let VideoAudioRecorder: any = null;
+let VideoAudioStreamer: any = null;
+try {
+  // In development, __dirname points to dist-electron/electron
+  // In production, it points to the packaged electron folder
+  const isDev = process.env.NODE_ENV === 'development' || !app?.isPackaged;
+  const nativeAudioPath = isDev
+    ? path.join(__dirname, '../../native-audio')
+    : path.join(process.resourcesPath || __dirname, 'native-audio');
+  
+  // Add DLL directory to PATH so Windows can find FFmpeg DLLs
+  // Windows looks for DLLs in: 1) Same dir as .exe, 2) Same dir as .node file, 3) PATH
+  const dllPath = path.join(nativeAudioPath, 'build/Release');
+  if (fs.existsSync(dllPath)) {
+    const currentPath = process.env.PATH || '';
+    if (!currentPath.includes(dllPath)) {
+      process.env.PATH = `${dllPath};${currentPath}`;
+      debugLog('📁 Added DLL path to PATH:', dllPath);
+    }
+  } else {
+    debugWarn('⚠️ DLL directory not found:', dllPath);
+  }
+  
+  const nativeModule = require(path.join(nativeAudioPath, 'index.js'));
+
+  // Single toggle controls native verbosity too.
+  if (typeof nativeModule?.setDebugLogging === 'function') {
+    nativeModule.setDebugLogging(DEBUG_LOGS);
+  }
+
+  VideoAudioRecorder = nativeModule.VideoAudioRecorder;
+  VideoAudioStreamer = nativeModule.VideoAudioStreamer;
+  debugLog('✅ Native module loaded successfully from:', nativeAudioPath);
+  debugLog('📦 Available exports:', Object.keys(nativeModule));
+  if (VideoAudioRecorder) {
+    debugLog('✅ VideoAudioRecorder native module loaded successfully');
+  } else {
+    console.error('❌ VideoAudioRecorder is null/undefined in native module');
+    console.error('Available exports:', Object.keys(nativeModule));
+  }
+
+  if (VideoAudioStreamer) {
+    debugLog('✅ VideoAudioStreamer native module loaded successfully');
+  } else {
+    console.error('❌ VideoAudioStreamer is null/undefined in native module');
+  }
+} catch (error) {
+  console.error('❌ Failed to load native module:', error);
+  console.error('Make sure to run "npm run build:native" first');
+}
+
+// Recording state
+let videoAudioRecorder: any = null;
+let recordingOutputPath: string | null = null;
+
+// Streaming state
+let videoAudioStreamer: any = null;
+let streamingRtmpUrl: string | null = null;
+
+
+const createWindow = () => {
+  registerIoniaVideoProtocol();
+
+  // Create the browser window
+  const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+  const preloadPath = isDev
+    ? path.join(__dirname, '../../electron/preload.js')
+    : path.join(__dirname, 'preload.js');
+  
+  const mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    webPreferences: {
+      preload: preloadPath,
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+
+  // Handle file dialog
+  ipcMain.handle('dialog:openFile', async () => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      filters: [
+        { name: 'Videos', extensions: ['mp4', 'webm', 'ogg', 'mov', 'avi', 'mkv', 'flv', 'wmv'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    });
+    return { canceled, filePaths };
+  });
+
+  // Handle recording start - using VideoAudioRecorder like test_video_audio_recorder.js
+  ipcMain.handle('recording:start', async () => {
+    if (videoAudioRecorder) {
+      return { success: false, error: 'Recording already in progress' };
+    }
+
+    if (!VideoAudioRecorder) {
+      return { success: false, error: 'VideoAudioRecorder not available. Make sure the native module is compiled.' };
+    }
+
+    try {
+      // Create recordings folder if it doesn't exist
+      const basePath = app.isPackaged 
+        ? app.getPath('userData') 
+        : path.join(__dirname, '../../');
+      const recordingsDir = path.join(basePath, 'recordings');
+      if (!fs.existsSync(recordingsDir)) {
+        fs.mkdirSync(recordingsDir, { recursive: true });
+      }
+
+      // Generate output filename with timestamp
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      recordingOutputPath = path.join(recordingsDir, `recording_${timestamp}.mp4`);
+
+      // Debug: Check DLL path before initialization
+      const isDev = process.env.NODE_ENV === 'development' || !app?.isPackaged;
+      const debugNativeAudioPath = isDev
+        ? path.join(__dirname, '../../native-audio')
+        : path.join(process.resourcesPath || __dirname, 'native-audio');
+      const dllPath = path.join(debugNativeAudioPath, 'build/Release');
+      debugLog('🔍 Debug: DLL path:', dllPath);
+      debugLog('🔍 Debug: DLL path exists:', fs.existsSync(dllPath));
+      if (fs.existsSync(dllPath)) {
+        const dlls = fs.readdirSync(dllPath).filter((f: string) => f.endsWith('.dll'));
+        debugLog('🔍 Debug: Found DLLs:', dlls.length, 'files');
+        const requiredDlls = ['avcodec.dll', 'avformat.dll', 'avutil.dll', 'swresample.dll'];
+        for (const dll of requiredDlls) {
+          const exists = fs.existsSync(path.join(dllPath, dll));
+          debugLog(`🔍 Debug: ${dll}: ${exists ? '✅' : '❌'}`);
+        }
+      }
+
+      // Create VideoAudioRecorder instance
+      debugLog('🎬 Creating VideoAudioRecorder instance...');
+      videoAudioRecorder = new VideoAudioRecorder();
+
+      // Initialize recorder
+      // Parameters: outputPath, fps (optional, default 30), videoBitrate (optional, default 5000000), 
+      //             useNvenc (optional, default true), audioBitrate (optional, default 192000),
+      //             audioMode (optional, default "both" - can be "mic", "desktop", or "both")
+      debugLog('🔧 Initializing recorder...');
+      debugLog(`   Output: ${recordingOutputPath}`);
+      debugLog(`   Settings: 30fps, 5Mbps video, NVENC=true, 192kbps audio, mode=both`);
+      debugLog('⚠️  IMPORTANT: Check the console ABOVE for C++ error messages starting with [VideoEncoder]');
+      debugLog('⚠️  These messages appear BEFORE the JavaScript exception and show the real error!');
+      
+      let initialized: boolean;
+      try {
+        initialized = videoAudioRecorder.initialize(recordingOutputPath, 30, 5000000, true, 192000, 'both');
+      } catch (initError: any) {
+        console.error('❌ Exception during VideoAudioRecorder initialization:', initError);
+        console.error('Error details:', {
+          message: initError?.message,
+          stack: initError?.stack,
+          name: initError?.name
+        });
+        console.error('⚠️  The C++ error message should appear ABOVE this line in the console!');
+        console.error('⚠️  Look for lines starting with [VideoEncoder] to see the real error.');
+        videoAudioRecorder = null;
+        recordingOutputPath = null;
+        const errorMsg = initError?.message || String(initError);
+        return { success: false, error: `Failed to initialize VideoAudioRecorder: ${errorMsg}. Check Electron console ABOVE for [VideoEncoder] error messages.` };
+      }
+      
+      if (!initialized) {
+        console.error('❌ Failed to initialize recorder (returned false)');
+        console.error('   Check Electron console above for C++ error messages from VideoEncoder');
+        console.error('   Common causes:');
+        console.error('   - Missing FFmpeg DLLs in native-audio/build/Release/');
+        console.error('   - FFmpeg not compiled with H.264 support');
+        console.error('   - Codec initialization failed');
+        videoAudioRecorder = null;
+        recordingOutputPath = null;
+        return { success: false, error: 'Failed to initialize recorder. Check Electron console for C++ error details (look for [VideoEncoder] messages).' };
+      }
+      debugLog('✅ Recorder initialized');
+
+      // Start recording
+      debugLog('▶️  Starting recording...');
+      let started: boolean;
+      try {
+        started = videoAudioRecorder.start();
+      } catch (startError: any) {
+        console.error('❌ Exception during VideoAudioRecorder start:', startError);
+        videoAudioRecorder = null;
+        recordingOutputPath = null;
+        return { success: false, error: `Failed to start VideoAudioRecorder: ${startError?.message || startError}` };
+      }
+      
+      if (!started) {
+        console.error('❌ Failed to start recording (returned false)');
+        videoAudioRecorder = null;
+        recordingOutputPath = null;
+        return { success: false, error: 'Failed to start recording' };
+      }
+      debugLog('✅ Recording started');
+      debugLog(`📁 Output: ${recordingOutputPath}`);
+
+      return { success: true, outputPath: recordingOutputPath };
+    } catch (error) {
+      console.error('❌ Error during recording start:', error);
+      videoAudioRecorder = null;
+      recordingOutputPath = null;
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  // Handle recording stop - using VideoAudioRecorder like test_video_audio_recorder.js
+  ipcMain.handle('recording:stop', async () => {
+    if (!videoAudioRecorder) {
+      return { success: false, error: 'No recording in progress' };
+    }
+
+    try {
+      const outputPath = recordingOutputPath;
+      const recorderToStop = videoAudioRecorder;
+      
+      // Stop recording
+      debugLog('⏹️  Stopping recording...');
+      const stopped = recorderToStop.stop();
+      
+      if (!stopped) {
+        console.error('❌ Failed to stop recording');
+        videoAudioRecorder = null;
+        recordingOutputPath = null;
+        return { success: false, error: 'Failed to stop recording' };
+      }
+      debugLog('✅ Recording stopped');
+
+      // Clear the reference
+      videoAudioRecorder = null;
+      const finalOutputPath = recordingOutputPath;
+      recordingOutputPath = null;
+
+      // Wait a bit for file to be finalized
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Get final statistics
+      const finalStats = recorderToStop.getStatistics();
+      debugLog('📊 Final Statistics:');
+      debugLog(`   Video Frames Captured: ${finalStats.videoFramesCaptured}`);
+      debugLog(`   Video Packets Encoded: ${finalStats.videoPacketsEncoded}`);
+      debugLog(`   Audio Packets Encoded: ${finalStats.audioPacketsEncoded}`);
+      debugLog(`   Video Packets Muxed: ${finalStats.videoPacketsMuxed}`);
+      debugLog(`   Audio Packets Muxed: ${finalStats.audioPacketsMuxed}`);
+      debugLog(`   Total Bytes: ${finalStats.totalBytes} (${(finalStats.totalBytes / 1024 / 1024).toFixed(2)} MB)`);
+
+      // Verify file exists and is valid
+      if (finalOutputPath && fs.existsSync(finalOutputPath)) {
+        const stats = fs.statSync(finalOutputPath);
+        const fileSizeMB = (stats.size / 1024 / 1024).toFixed(2);
+        debugLog(`📁 Recording file size: ${fileSizeMB} MB`);
+        
+        if (stats.size > 1024) {
+          debugLog('✅ Recording file appears to be valid');
+          debugLog(`\n🎉 Recording finished successfully!`);
+          debugLog(`📂 Saved to: ${finalOutputPath}\n`);
+          return { success: true, outputPath: finalOutputPath };
+        } else {
+          console.error('❌ Recording file is too small (likely incomplete):', stats.size, 'bytes');
+          return { success: false, error: `Recording file is too small (${stats.size} bytes) - may be incomplete` };
+        }
+      } else {
+        console.error('❌ Recording file was not created!');
+        return { success: false, error: 'Recording file was not created' };
+      }
+    } catch (error) {
+      console.error('❌ Error during recording stop:', error);
+      videoAudioRecorder = null;
+      recordingOutputPath = null;
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  // Handle streaming start
+  ipcMain.handle('stream:start', async (event, rtmpUrl: string) => {
+    if (videoAudioStreamer) {
+      return { success: false, error: 'Streaming already in progress' };
+    }
+
+    if (videoAudioRecorder) {
+      return { success: false, error: 'Recording in progress. Stop recording before starting stream.' };
+    }
+
+    if (!VideoAudioStreamer) {
+      return { success: false, error: 'VideoAudioStreamer not available. Make sure the native module is compiled.' };
+    }
+
+    if (!rtmpUrl || rtmpUrl.trim() === '') {
+      return { success: false, error: 'RTMP URL is required' };
+    }
+
+    try {
+      streamingRtmpUrl = rtmpUrl.trim();
+      debugLog('📡 Starting stream to:', streamingRtmpUrl);
+
+      debugLog('🎥 Creating VideoAudioStreamer instance...');
+      videoAudioStreamer = new VideoAudioStreamer();
+
+      debugLog('🔧 Initializing streamer...');
+      debugLog('   Settings: 30fps, 5Mbps video, NVENC=true, 192kbps audio, mode=both');
+      let initialized: boolean;
+      try {
+        initialized = videoAudioStreamer.initialize(streamingRtmpUrl, 30, 5000000, true, 192000, 'both');
+      } catch (initError: any) {
+        console.error('❌ Exception during VideoAudioStreamer initialization:', initError);
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        const errorMsg = initError?.message || String(initError);
+        return { success: false, error: `Failed to initialize stream: ${errorMsg}` };
+      }
+
+      if (!initialized) {
+        console.error('❌ Failed to initialize stream (returned false)');
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        return { success: false, error: 'Failed to initialize stream. Check Electron console for C++ error details.' };
+      }
+
+      debugLog('▶️  Starting stream...');
+      let started: boolean;
+      try {
+        started = videoAudioStreamer.start();
+      } catch (startError: any) {
+        console.error('❌ Exception during VideoAudioStreamer start:', startError);
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        return { success: false, error: `Failed to start stream: ${startError?.message || startError}` };
+      }
+
+      if (!started) {
+        console.error('❌ Failed to start stream (returned false)');
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        return { success: false, error: 'Failed to start stream' };
+      }
+
+      debugLog('✅ Streaming started');
+      return { success: true, rtmpUrl: streamingRtmpUrl };
+    } catch (error) {
+      console.error('❌ Error during stream start:', error);
+      videoAudioStreamer = null;
+      streamingRtmpUrl = null;
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  // Handle streaming stop
+  ipcMain.handle('stream:stop', async () => {
+    if (!videoAudioStreamer) {
+      return { success: false, error: 'No streaming in progress' };
+    }
+
+    try {
+      const streamerToStop = videoAudioStreamer;
+      const rtmpUrl = streamingRtmpUrl;
+      
+      debugLog('⏹️  Stopping stream...');
+
+      let stopped: boolean;
+      try {
+        stopped = streamerToStop.stop();
+      } catch (stopError: any) {
+        console.error('❌ Exception during VideoAudioStreamer stop:', stopError);
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        return { success: false, error: `Failed to stop stream: ${stopError?.message || stopError}` };
+      }
+
+      if (!stopped) {
+        console.error('❌ Failed to stop stream (returned false)');
+        videoAudioStreamer = null;
+        streamingRtmpUrl = null;
+        return { success: false, error: 'Failed to stop stream' };
+      }
+      
+      videoAudioStreamer = null;
+      streamingRtmpUrl = null;
+      
+      debugLog('✅ Stream stopped');
+      return { success: true, rtmpUrl };
+    } catch (error) {
+      console.error('❌ Error during stream stop:', error);
+      videoAudioStreamer = null;
+      streamingRtmpUrl = null;
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  // Load the app
+  // In development, load from Vite dev server
+  // In production, load from built files
+  const loadApp = () => {
+    const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
+    if (isDev) {
+      mainWindow.loadURL('http://localhost:5173').catch((err) => {
+        console.error('Failed to load dev server, retrying...', err);
+        // Retry after 2 seconds
+        setTimeout(loadApp, 2000);
+      });
+      mainWindow.webContents.openDevTools();
+    } else {
+      mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    }
+  };
+  
+  loadApp();
+};
+
+// This method will be called when Electron has finished initialization
+app.on('ready', createWindow);
+
+// Quit when all windows are closed
+app.on('window-all-closed', () => {
+  if (process.env.platform !== 'darwin') {
+    app.quit();
+  }
+});
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
+  }
+});
+
