@@ -124,3 +124,6 @@ start-dev.ps1
 native-audio/config.json
 config.json
 *.config.json
+
+# Ignore deps directory (third-party repositories, build deps)
+deps/
