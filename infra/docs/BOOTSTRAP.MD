@@ -145,3 +145,41 @@ server {
         add_header Access-Control-Allow-Origin *;
     }
 }
+
+
+/opt/ionia/infra/scripts/deploy_nginx.sh
+#!/bin/bash
+set -euo pipefail
+
+REPO_DIR="/opt/ionia"
+NGINX_BIN="/usr/sbin/nginx"
+
+# Branch to deploy (default: main)
+BRANCH="${1:-main}"
+
+echo "🚀 Starting nginx deploy"
+echo "📦 Repo:   $REPO_DIR"
+echo "🌿 Branch: $BRANCH"
+
+cd "$REPO_DIR"
+
+echo "📥 Fetching latest changes..."
+git fetch origin
+
+echo "🔀 Checking out branch: $BRANCH"
+git checkout "$BRANCH"
+
+echo "🧹 Resetting to origin/$BRANCH"
+git reset --hard "origin/$BRANCH"
+
+echo "🧪 Testing nginx configuration..."
+$NGINX_BIN -t
+
+echo "♻️ Reloading nginx (zero downtime)..."
+systemctl reload nginx
+
+echo "✅ Deploy successful from branch '$BRANCH'"
+
+chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
+
+./infra/scripts/deploy_nginx.sh phase-2-server-setup (example)
