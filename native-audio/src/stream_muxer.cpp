@@ -12,6 +12,7 @@ extern "C" {
 
 #include <cstring>
 #include <cstdio>
+#include <vector>
 
 /* ============================== */
 
@@ -68,6 +69,113 @@ static bool SetAacAudioSpecificConfigExtradata(AVStream* stream, int sampleRate,
     memset(stream->codecpar->extradata + sizeof(asc), 0, AV_INPUT_BUFFER_PADDING_SIZE);
     stream->codecpar->extradata_size = (int)sizeof(asc);
     return true;
+}
+
+// Extract SPS/PPS NAL units from an H.264 packet buffer.
+static void ExtractSpsPpsFromH264(const uint8_t* data, int size,
+                                  std::vector<std::vector<uint8_t>>& spsList,
+                                  std::vector<std::vector<uint8_t>>& ppsList)
+{
+    spsList.clear();
+    ppsList.clear();
+    if (!data || size <= 4) return;
+
+    // Detect Annex-B (start codes) by scanning for 0x000001 within the first 64 bytes
+    bool isAnnexB = false;
+    int scanLimit = size < 64 ? size : 64;
+    for (int i = 0; i + 3 < scanLimit; ++i) {
+        if (data[i] == 0x00 && data[i+1] == 0x00 && data[i+2] == 0x01) { isAnnexB = true; break; }
+        if (i + 4 < scanLimit && data[i] == 0x00 && data[i+1] == 0x00 && data[i+2] == 0x00 && data[i+3] == 0x01) { isAnnexB = true; break; }
+    }
+
+    if (isAnnexB) {
+        // Parse start-code delimited NAL units
+        int i = 0;
+        while (i < size) {
+            // find start code
+            int sc = -1; // length of start code (3 or 4)
+            if (i + 3 < size && data[i] == 0x00 && data[i+1] == 0x00 && data[i+2] == 0x01) sc = 3;
+            else if (i + 4 < size && data[i] == 0x00 && data[i+1] == 0x00 && data[i+2] == 0x00 && data[i+3] == 0x01) sc = 4;
+            if (sc < 0) { ++i; continue; }
+            int nalStart = i + sc;
+            int nalEnd = nalStart;
+            // find next start code
+            int j = nalStart;
+            while (j < size) {
+                if (j + 3 < size && data[j] == 0x00 && data[j+1] == 0x00 && data[j+2] == 0x01) break;
+                if (j + 4 < size && data[j] == 0x00 && data[j+1] == 0x00 && data[j+2] == 0x00 && data[j+3] == 0x01) break;
+                ++j;
+            }
+            nalEnd = j;
+            if (nalEnd > nalStart) {
+                const uint8_t* nal = data + nalStart;
+                int nalSize = nalEnd - nalStart;
+                uint8_t nalType = nal[0] & 0x1F;
+                if (nalType == 7) spsList.emplace_back(nal, nal + nalSize);
+                else if (nalType == 8) ppsList.emplace_back(nal, nal + nalSize);
+            }
+            i = nalEnd;
+        }
+    } else {
+        // Assume length-prefixed NAL units (4-byte big-endian length)
+        int pos = 0;
+        while (pos + 4 <= size) {
+            uint32_t nalLen = (uint32_t)data[pos] << 24 | (uint32_t)data[pos+1] << 16 | (uint32_t)data[pos+2] << 8 | (uint32_t)data[pos+3];
+            pos += 4;
+            if (nalLen == 0 || pos + (int)nalLen > size) break;
+            const uint8_t* nal = data + pos;
+            uint8_t nalType = nal[0] & 0x1F;
+            if (nalType == 7) spsList.emplace_back(nal, nal + nalLen);
+            else if (nalType == 8) ppsList.emplace_back(nal, nal + nalLen);
+            pos += nalLen;
+        }
+    }
+}
+
+// Build AVCDecoderConfigurationRecord (avcC) from SPS/PPS
+static std::vector<uint8_t> BuildAvcC(const std::vector<std::vector<uint8_t>>& spsList,
+                                      const std::vector<std::vector<uint8_t>>& ppsList)
+{
+    std::vector<uint8_t> out;
+    if (spsList.empty() || ppsList.empty()) return out;
+
+    const std::vector<uint8_t>& sps = spsList[0];
+    const std::vector<uint8_t>& pps = ppsList[0];
+    if (sps.size() < 4) return out; // need profile/level bytes
+
+    uint8_t profile = sps[1];
+    uint8_t profile_compat = sps[2];
+    uint8_t level = sps[3];
+
+    // configurationVersion
+    out.push_back(0x01);
+    // AVCProfileIndication, profile_compatibility, AVCLevelIndication
+    out.push_back(profile);
+    out.push_back(profile_compat);
+    out.push_back(level);
+    // lengthSizeMinusOne (0b111111 + 2 bits lengthSizeMinusOne=3 for 4-byte lengths)
+    out.push_back(0xFF);
+    // numOfSequenceParameterSets (0b11100001 = 0xE1) and number of SPS (1)
+    out.push_back(0xE0 | (uint8_t)(spsList.size() & 0x1F));
+
+    // SPS entries
+    for (const auto& s : spsList) {
+        uint16_t len = (uint16_t)s.size();
+        out.push_back((len >> 8) & 0xFF);
+        out.push_back(len & 0xFF);
+        out.insert(out.end(), s.begin(), s.end());
+    }
+
+    // numOfPictureParameterSets
+    out.push_back((uint8_t)ppsList.size());
+    for (const auto& p : ppsList) {
+        uint16_t len = (uint16_t)p.size();
+        out.push_back((len >> 8) & 0xFF);
+        out.push_back(len & 0xFF);
+        out.insert(out.end(), p.begin(), p.end());
+    }
+
+    return out;
 }
 
 StreamMuxer::StreamMuxer()
@@ -288,6 +396,31 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex) {
         m_sentFirstVideoKeyframe = true;
     }
 
+    // If this is the first keyframe and we haven't sent the AVC sequence header,
+    // try to extract SPS/PPS from the packet (if encoder didn't provide extradata)
+    if (pktIn->isKeyframe && !m_sentAVCSequenceHeader) {
+        if (!m_videoStream->codecpar->extradata || m_videoStream->codecpar->extradata_size == 0) {
+            std::vector<std::vector<uint8_t>> spsList;
+            std::vector<std::vector<uint8_t>> ppsList;
+            ExtractSpsPpsFromH264(pktIn->data.data(), (int)pktIn->data.size(), spsList, ppsList);
+            if (!spsList.empty() && !ppsList.empty()) {
+                std::vector<uint8_t> avcC = BuildAvcC(spsList, ppsList);
+                if (!avcC.empty()) {
+                    // Set codecpar extradata so the FLV muxer can emit avcC
+                    m_videoStream->codecpar->extradata = (uint8_t*)av_malloc(avcC.size() + AV_INPUT_BUFFER_PADDING_SIZE);
+                    if (m_videoStream->codecpar->extradata) {
+                        memcpy(m_videoStream->codecpar->extradata, avcC.data(), avcC.size());
+                        memset(m_videoStream->codecpar->extradata + avcC.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
+                        m_videoStream->codecpar->extradata_size = (int)avcC.size();
+                    }
+                }
+            }
+        }
+
+        // Send (or buffer) the AVC sequence header before the first video packet
+        SendAVCSequenceHeader();
+    }
+
     // MONOTONIC DTS CHECK
     if (pkt->dts <= m_lastWrittenVideoDTS) {
         av_packet_free(&pkt);
@@ -461,9 +594,17 @@ void StreamMuxer::SendAVCSequenceHeader() {
     pkt->duration = 0;
     pkt->stream_index = m_videoStream->index;
 
-    av_write_frame(m_formatContext, pkt);
-    av_packet_free(&pkt);
-    
+    if (m_buffer) {
+        // Add sequence header packet to the buffer so it preserves ordering
+        if (!m_buffer->AddPacket(pkt)) {
+            av_packet_free(&pkt);
+            return;
+        }
+    } else {
+        av_write_frame(m_formatContext, pkt);
+        av_packet_free(&pkt);
+    }
+
     m_sentAVCSequenceHeader = true;
 }
 
