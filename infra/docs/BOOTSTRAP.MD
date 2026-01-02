@@ -185,3 +185,9 @@ chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
 ./infra/scripts/deploy_nginx.sh phase-2-server-setup (example)
 
 chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
+
+chown -R www-data:www-data /srv/recordings
+chmod 755 /srv/recordings
+
+or 
+chown -R nobody:nogroup /srv/recordings
