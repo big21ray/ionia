@@ -191,3 +191,6 @@ chmod 755 /srv/recordings
 
 or 
 chown -R nobody:nogroup /srv/recordings
+
+chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
+
