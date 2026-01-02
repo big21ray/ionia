@@ -183,3 +183,5 @@ echo "✅ Deploy successful from branch '$BRANCH'"
 chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
 
 ./infra/scripts/deploy_nginx.sh phase-2-server-setup (example)
+
+chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
