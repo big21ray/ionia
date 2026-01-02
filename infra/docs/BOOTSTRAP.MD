@@ -194,3 +194,20 @@ chown -R nobody:nogroup /srv/recordings
 
 chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
 
+--------------------------------------------------------------------------------------
+
+git clone https://github.com/ossrs/srs.git
+
+cd /opt/srs/trunk
+git submodule update --init --recursive
+./configure
+make -j$(nproc)
+
+
+mkdir -p /srv/srs/hls
+mkdir -p /srv/srs/recordings
+
+chmod -R 755 /srv/srs
+
+cd /opt/srs/trunk
+./objs/srs -c conf/ionia.conf
