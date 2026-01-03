@@ -105,9 +105,9 @@ rtmp {
 
             # Recording
             record all;
-            record_path /srv/recordings;
+            record_path /srv/srs/recordings;
             record_unique on;
-            record_suffix .mp4;
+            record_suffix .flv;
         }
     }
 }
@@ -155,38 +155,13 @@ server {
 }
 
 
-/opt/ionia/infra/scripts/deploy_nginx.sh
-#!/bin/bash
-set -euo pipefail
+Deploy script lives in the repo:
 
-REPO_DIR="/opt/ionia"
-NGINX_BIN="/usr/sbin/nginx"
+- /opt/ionia/infra/scripts/deploy_nginx.sh
 
-# Branch to deploy (default: main)
-BRANCH="${1:-main}"
+Manual run example:
 
-echo "🚀 Starting nginx deploy"
-echo "📦 Repo:   $REPO_DIR"
-echo "🌿 Branch: $BRANCH"
-
-cd "$REPO_DIR"
-
-echo "📥 Fetching latest changes..."
-git fetch origin
-
-echo "🔀 Checking out branch: $BRANCH"
-git checkout "$BRANCH"
-
-echo "🧹 Resetting to origin/$BRANCH"
-git reset --hard "origin/$BRANCH"
-
-echo "🧪 Testing nginx configuration..."
-$NGINX_BIN -t
-
-echo "♻️ Reloading nginx (zero downtime)..."
-systemctl reload nginx
-
-echo "✅ Deploy successful from branch '$BRANCH'"
+- bash /opt/ionia/infra/scripts/deploy_nginx.sh phase-2-server-setup
 
 chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
 
@@ -307,3 +282,6 @@ vhost __defaultVhost__ {
         dvr_wait_keyframe   on;
     }
 }
+
+
+sudo chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
