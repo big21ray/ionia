@@ -1,4 +1,5 @@
 #include "audio_capture.h"
+#include "ionia_logging.h"
 #include <iostream>
 #include <comdef.h>
 #include <propidl.h>
@@ -70,15 +71,15 @@ bool AudioCapture::Initialize(AudioDataCallback callback, const char* captureMod
     HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (hr == RPC_E_CHANGED_MODE) {
         // COM is already initialized in STA mode - this is expected in Electron
-        fprintf(stderr, "[AudioCapture] COM already in STA mode (RPC_E_CHANGED_MODE) - continuing\n");
+        Ionia::LogDebugf("[AudioCapture] COM already in STA mode (RPC_E_CHANGED_MODE) - continuing\n");
     } else if (hr == S_FALSE) {
         // COM was already initialized in MTA mode
-        fprintf(stderr, "[AudioCapture] COM already initialized in MTA mode\n");
+        Ionia::LogDebugf("[AudioCapture] COM already initialized in MTA mode\n");
     } else if (hr == S_OK) {
         // We successfully initialized COM in MTA mode
-        fprintf(stderr, "[AudioCapture] COM initialized in MTA mode\n");
+        Ionia::LogDebugf("[AudioCapture] COM initialized in MTA mode\n");
     } else if (FAILED(hr)) {
-        fprintf(stderr, "[AudioCapture] COM initialization failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] COM initialization failed: 0x%08X\n", hr);
         return false;
     }
     m_comInitialized = (hr == S_OK);  // Only uninitialize if we initialized it
@@ -96,7 +97,7 @@ bool AudioCapture::Initialize(AudioDataCallback callback, const char* captureMod
     );
     
     if (FAILED(hr)) {
-        fprintf(stderr, "CoCreateInstance failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] CoCreateInstance failed: 0x%08X\n", hr);
         return false;
     }
     
@@ -110,7 +111,7 @@ bool AudioCapture::Initialize(AudioDataCallback callback, const char* captureMod
     // Initialize desktop audio (loopback) if requested
     if (wantDesktop) {
         if (!InitializeDesktopAudio()) {
-            fprintf(stderr, "Failed to initialize desktop audio\n");
+            Ionia::LogErrorf("[AudioCapture] Failed to initialize desktop audio\n");
             desktopOk = false;
         }
     }
@@ -121,13 +122,13 @@ bool AudioCapture::Initialize(AudioDataCallback callback, const char* captureMod
         // for the microphone so both streams share the same sample rate.
         if (m_captureMode == "both" && m_pwfxDesktop) {
             if (!InitializeMicrophone(m_pwfxDesktop)) {
-                fprintf(stderr, "Failed to initialize microphone with desktop format in BOTH mode\n");
+                Ionia::LogErrorf("[AudioCapture] Failed to initialize microphone with desktop format in BOTH mode\n");
                 micOk = false;
             }
         } else {
             // In "mic" mode or when desktop is not available, use mic's native mix format
             if (!InitializeMicrophone()) {
-                fprintf(stderr, "Failed to initialize microphone\n");
+                Ionia::LogErrorf("[AudioCapture] Failed to initialize microphone\n");
                 micOk = false;
             }
         }
@@ -135,21 +136,21 @@ bool AudioCapture::Initialize(AudioDataCallback callback, const char* captureMod
     
     // Must have at least one working source
     if (!desktopOk && !micOk) {
-        fprintf(stderr, "Failed to initialize both desktop and microphone audio\n");
+        Ionia::LogErrorf("[AudioCapture] Failed to initialize both desktop and microphone audio\n");
         return false;
     }
     
     if (!desktopOk && wantDesktop) {
-        fprintf(stderr, "Warning: Desktop audio failed, continuing with microphone only\n");
+        Ionia::LogErrorf("[AudioCapture] Warning: Desktop audio failed, continuing with microphone only\n");
     }
     if (!micOk && wantMic) {
-        fprintf(stderr, "Warning: Microphone failed, continuing with desktop audio only\n");
+        Ionia::LogErrorf("[AudioCapture] Warning: Microphone failed, continuing with desktop audio only\n");
     }
     
     // Initialize unified format: 48000 Hz, stereo, float32
     m_pwfxUnified = (WAVEFORMATEX*)CoTaskMemAlloc(sizeof(WAVEFORMATEX));
     if (!m_pwfxUnified) {
-        fprintf(stderr, "Failed to allocate memory for unified format\n");
+        Ionia::LogErrorf("[AudioCapture] Failed to allocate memory for unified format\n");
         return false;
     }
     m_pwfxUnified->wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
@@ -160,7 +161,7 @@ bool AudioCapture::Initialize(AudioDataCallback callback, const char* captureMod
     m_pwfxUnified->nAvgBytesPerSec = TARGET_SAMPLE_RATE * m_pwfxUnified->nBlockAlign;
     m_pwfxUnified->cbSize = 0;
     
-    fprintf(stderr, "Unified audio format: %u Hz, %u channels, float32\n",
+        Ionia::LogDebugf("[AudioCapture] Unified audio format: %u Hz, %u channels, float32\n",
             TARGET_SAMPLE_RATE, TARGET_CHANNELS);
     
     return true;
@@ -181,7 +182,7 @@ bool AudioCapture::InitializeDesktopAudio() {
     );
     
     if (FAILED(hr)) {
-        fprintf(stderr, "GetDefaultAudioEndpoint (desktop) failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] GetDefaultAudioEndpoint (desktop) failed: 0x%08X\n", hr);
         return false;
     }
     
@@ -194,7 +195,7 @@ bool AudioCapture::InitializeDesktopAudio() {
     );
     
     if (FAILED(hr)) {
-        fprintf(stderr, "Activate IAudioClient (desktop) failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] Activate IAudioClient (desktop) failed: 0x%08X\n", hr);
         return false;
     }
     
@@ -202,11 +203,11 @@ bool AudioCapture::InitializeDesktopAudio() {
     // (e.g. 7.1 float 44100 Hz on your headset).
     hr = m_pAudioClientDesktop->GetMixFormat(&m_pwfxDesktop);
     if (FAILED(hr)) {
-        fprintf(stderr, "GetMixFormat (desktop) failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] GetMixFormat (desktop) failed: 0x%08X\n", hr);
         return false;
     }
     
-    fprintf(stderr, "Desktop audio format (native): tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
+    Ionia::LogDebugf("[AudioCapture] Desktop audio format (native): tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
         m_pwfxDesktop->wFormatTag, m_pwfxDesktop->nChannels, m_pwfxDesktop->nSamplesPerSec,
         m_pwfxDesktop->wBitsPerSample, m_pwfxDesktop->nBlockAlign);
     
@@ -239,21 +240,21 @@ bool AudioCapture::InitializeDesktopAudio() {
     if (hr == S_OK) {
         // Device can output directly in 48k stereo float
         formatToUse = &desiredFormat;
-        fprintf(stderr,
-            "Desktop will use FORCED 48000 Hz stereo float format: tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
+        Ionia::LogDebugf(
+            "[AudioCapture] Desktop will use FORCED 48000 Hz stereo float format: tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
             formatToUse->wFormatTag, formatToUse->nChannels, formatToUse->nSamplesPerSec,
             formatToUse->wBitsPerSample, formatToUse->nBlockAlign);
     } else if (hr == S_FALSE && closestDesktop) {
         // Device suggests a closest supported format (may already be 48k / stereo)
         formatToUse = closestDesktop;
-        fprintf(stderr,
-            "Desktop will use CLOSEST supported format: tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
+        Ionia::LogDebugf(
+            "[AudioCapture] Desktop will use CLOSEST supported format: tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
             formatToUse->wFormatTag, formatToUse->nChannels, formatToUse->nSamplesPerSec,
             formatToUse->wBitsPerSample, formatToUse->nBlockAlign);
     } else {
         // Fallback: use native mix format
-        fprintf(stderr,
-            "Desktop: forced 48000 Hz stereo float format not supported, using native mix format.\n");
+        Ionia::LogDebugf(
+            "[AudioCapture] Desktop: forced 48000 Hz stereo float format not supported, using native mix format.\n");
         formatToUse = m_pwfxDesktop;
     }
     
@@ -272,7 +273,7 @@ bool AudioCapture::InitializeDesktopAudio() {
     );
     
     if (FAILED(hr)) {
-        fprintf(stderr, "IAudioClient::Initialize (desktop) failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] IAudioClient::Initialize (desktop) failed: 0x%08X\n", hr);
         return false;
     }
 
@@ -290,7 +291,7 @@ bool AudioCapture::InitializeDesktopAudio() {
         }
         m_pwfxDesktop = (WAVEFORMATEX*)CoTaskMemAlloc(allocSize);
         if (!m_pwfxDesktop) {
-            fprintf(stderr, "Failed to allocate memory for desktop format copy\n");
+            Ionia::LogErrorf("[AudioCapture] Failed to allocate memory for desktop format copy\n");
             return false;
         }
         memcpy(m_pwfxDesktop, formatToUse, allocSize);
@@ -303,21 +304,21 @@ bool AudioCapture::InitializeDesktopAudio() {
     );
     
     if (FAILED(hr)) {
-        fprintf(stderr, "GetService IAudioCaptureClient (desktop) failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] GetService IAudioCaptureClient (desktop) failed: 0x%08X\n", hr);
         return false;
     }
     
     // Create event for event-driven capture (OBS-style)
     m_hEventDesktop = CreateEvent(NULL, FALSE, FALSE, NULL);
     if (m_hEventDesktop == NULL) {
-        fprintf(stderr, "CreateEvent (desktop) failed\n");
+        Ionia::LogErrorf("[AudioCapture] CreateEvent (desktop) failed\n");
         return false;
     }
     
     // Set event handle for audio client (optional - fallback to polling if fails)
     hr = m_pAudioClientDesktop->SetEventHandle(m_hEventDesktop);
     if (FAILED(hr)) {
-        fprintf(stderr, "Warning: SetEventHandle (desktop) failed: 0x%08X - will use polling fallback\n", hr);
+        Ionia::LogDebugf("[AudioCapture] Warning: SetEventHandle (desktop) failed: 0x%08X - will use polling fallback\n", hr);
         // Don't fail - we can still capture with polling
         CloseHandle(m_hEventDesktop);
         m_hEventDesktop = nullptr;
@@ -337,7 +338,7 @@ bool AudioCapture::InitializeMicrophone(const WAVEFORMATEX* targetFormat) {
     );
     
     if (FAILED(hr)) {
-        fprintf(stderr, "GetDefaultAudioEndpoint (mic) failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] GetDefaultAudioEndpoint (mic) failed: 0x%08X\n", hr);
         return false;
     }
     
@@ -350,18 +351,18 @@ bool AudioCapture::InitializeMicrophone(const WAVEFORMATEX* targetFormat) {
     );
     
     if (FAILED(hr)) {
-        fprintf(stderr, "Activate IAudioClient (mic) failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] Activate IAudioClient (mic) failed: 0x%08X\n", hr);
         return false;
     }
     
     // Get native mix format for microphone
     hr = m_pAudioClientMic->GetMixFormat(&m_pwfxMic);
     if (FAILED(hr)) {
-        fprintf(stderr, "GetMixFormat (mic) failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] GetMixFormat (mic) failed: 0x%08X\n", hr);
         return false;
     }
     
-    fprintf(stderr, "Microphone native format: tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
+    Ionia::LogDebugf("[AudioCapture] Microphone native format: tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
         m_pwfxMic->wFormatTag, m_pwfxMic->nChannels, m_pwfxMic->nSamplesPerSec,
         m_pwfxMic->wBitsPerSample, m_pwfxMic->nBlockAlign);
     
@@ -382,17 +383,17 @@ bool AudioCapture::InitializeMicrophone(const WAVEFORMATEX* targetFormat) {
         if (hrTest == S_OK) {
             // Desktop format is directly supported for the mic
             formatToUse = targetFormat;
-            fprintf(stderr, "Microphone will use DESKTOP format: tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
+            Ionia::LogDebugf("[AudioCapture] Microphone will use DESKTOP format: tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
                 formatToUse->wFormatTag, formatToUse->nChannels, formatToUse->nSamplesPerSec,
                 formatToUse->wBitsPerSample, formatToUse->nBlockAlign);
         } else if (hrTest == S_FALSE && closest) {
             // A closest match is provided; use it
             formatToUse = closest;
-            fprintf(stderr, "Microphone will use CLOSEST format to desktop: tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
+            Ionia::LogDebugf("[AudioCapture] Microphone will use CLOSEST format to desktop: tag=%d, channels=%d, rate=%d, bits=%d, align=%d\n",
                 formatToUse->wFormatTag, formatToUse->nChannels, formatToUse->nSamplesPerSec,
                 formatToUse->wBitsPerSample, formatToUse->nBlockAlign);
         } else {
-            fprintf(stderr, "Microphone: desktop format not supported, using native mic format instead.\n");
+            Ionia::LogDebugf("[AudioCapture] Microphone: desktop format not supported, using native mic format instead.\n");
         }
     }
     
@@ -410,7 +411,7 @@ bool AudioCapture::InitializeMicrophone(const WAVEFORMATEX* targetFormat) {
     );
     
     if (FAILED(hr)) {
-        fprintf(stderr, "IAudioClient::Initialize (mic) failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] IAudioClient::Initialize (mic) failed: 0x%08X\n", hr);
         return false;
     }
     
@@ -430,7 +431,7 @@ bool AudioCapture::InitializeMicrophone(const WAVEFORMATEX* targetFormat) {
         }
         m_pwfxMic = (WAVEFORMATEX*)CoTaskMemAlloc(allocSize);
         if (!m_pwfxMic) {
-            fprintf(stderr, "Failed to allocate memory for microphone format copy\n");
+            Ionia::LogErrorf("[AudioCapture] Failed to allocate memory for microphone format copy\n");
             return false;
         }
         memcpy(m_pwfxMic, formatToUse, allocSize);
@@ -443,21 +444,21 @@ bool AudioCapture::InitializeMicrophone(const WAVEFORMATEX* targetFormat) {
     );
     
     if (FAILED(hr)) {
-        fprintf(stderr, "GetService IAudioCaptureClient (mic) failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[AudioCapture] GetService IAudioCaptureClient (mic) failed: 0x%08X\n", hr);
         return false;
     }
     
     // Create event for event-driven capture (OBS-style)
     m_hEventMic = CreateEvent(NULL, FALSE, FALSE, NULL);
     if (m_hEventMic == NULL) {
-        fprintf(stderr, "CreateEvent (mic) failed\n");
+        Ionia::LogErrorf("[AudioCapture] CreateEvent (mic) failed\n");
         return false;
     }
     
     // Set event handle for audio client (optional - fallback to polling if fails)
     hr = m_pAudioClientMic->SetEventHandle(m_hEventMic);
     if (FAILED(hr)) {
-        fprintf(stderr, "Warning: SetEventHandle (mic) failed: 0x%08X - will use polling fallback\n", hr);
+        Ionia::LogDebugf("[AudioCapture] Warning: SetEventHandle (mic) failed: 0x%08X - will use polling fallback\n", hr);
         // Don't fail - we can still capture with polling
         CloseHandle(m_hEventMic);
         m_hEventMic = nullptr;
@@ -469,16 +470,16 @@ bool AudioCapture::InitializeMicrophone(const WAVEFORMATEX* targetFormat) {
 bool AudioCapture::Start() {
     // Must have at least one audio client
     if (m_isCapturing || (!m_pAudioClientDesktop && !m_pAudioClientMic)) {
-        fprintf(stderr, "Start failed: already capturing or no audio clients\n");
+        Ionia::LogErrorf("[AudioCapture] Start failed: already capturing or no audio clients\n");
         return false;
     }
     
-    fprintf(stderr, "Starting audio capture...\n");
+    Ionia::LogInfof("[AudioCapture] Starting audio capture...\n");
     if (m_pAudioClientDesktop) {
-        fprintf(stderr, "  Desktop audio: available\n");
+        Ionia::LogInfof("[AudioCapture]   Desktop audio: available\n");
     }
     if (m_pAudioClientMic) {
-        fprintf(stderr, "  Microphone: available\n");
+        Ionia::LogInfof("[AudioCapture]   Microphone: available\n");
     }
     
     // Reset mixing state
@@ -493,13 +494,13 @@ bool AudioCapture::Start() {
     if (m_pAudioClientDesktop) {
         HRESULT hr = m_pAudioClientDesktop->Start();
         if (FAILED(hr)) {
-            fprintf(stderr, "Failed to start desktop audio capture: 0x%08X\n", hr);
+            Ionia::LogErrorf("[AudioCapture] Failed to start desktop audio capture: 0x%08X\n", hr);
             // Continue if we have microphone
             if (!m_pAudioClientMic) {
                 return false;
             }
         } else {
-            fprintf(stderr, "Desktop audio capture started successfully\n");
+            Ionia::LogDebugf("[AudioCapture] Desktop audio capture started successfully\n");
         }
     }
     
@@ -507,13 +508,13 @@ bool AudioCapture::Start() {
     if (m_pAudioClientMic) {
         HRESULT hr = m_pAudioClientMic->Start();
     if (FAILED(hr)) {
-            fprintf(stderr, "Failed to start microphone capture: 0x%08X\n", hr);
+            Ionia::LogErrorf("[AudioCapture] Failed to start microphone capture: 0x%08X\n", hr);
             // Continue if we have desktop
             if (!m_pAudioClientDesktop) {
         return false;
             }
         } else {
-            fprintf(stderr, "Microphone capture started successfully\n");
+            Ionia::LogDebugf("[AudioCapture] Microphone capture started successfully\n");
         }
     }
     
@@ -522,21 +523,21 @@ bool AudioCapture::Start() {
     
     // Start capture threads with proper priority
     if (m_pAudioClientDesktop) {
-        fprintf(stderr, "Starting desktop capture thread...\n");
+        Ionia::LogDebugf("[AudioCapture] Starting desktop capture thread...\n");
         m_captureThreadDesktop = std::thread(&AudioCapture::CaptureThreadDesktop, this);
         // Set thread priority to TIME_CRITICAL (OBS-style)
         SetThreadPriority(m_captureThreadDesktop.native_handle(), THREAD_PRIORITY_TIME_CRITICAL);
-        fprintf(stderr, "Desktop capture thread started\n");
+        Ionia::LogDebugf("[AudioCapture] Desktop capture thread started\n");
     }
     if (m_pAudioClientMic) {
-        fprintf(stderr, "Starting microphone capture thread...\n");
+        Ionia::LogDebugf("[AudioCapture] Starting microphone capture thread...\n");
         m_captureThreadMic = std::thread(&AudioCapture::CaptureThreadMic, this);
         // Set thread priority to TIME_CRITICAL (OBS-style)
         SetThreadPriority(m_captureThreadMic.native_handle(), THREAD_PRIORITY_TIME_CRITICAL);
-        fprintf(stderr, "Microphone capture thread started\n");
+        Ionia::LogDebugf("[AudioCapture] Microphone capture thread started\n");
     }
     
-    fprintf(stderr, "Audio capture started successfully\n");
+    Ionia::LogInfof("[AudioCapture] Audio capture started successfully\n");
     return true;
 }
 
@@ -634,7 +635,7 @@ void AudioCapture::CaptureThreadDesktop() {
             
             if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
                 // Data discontinuity - log but continue
-                fprintf(stderr, "Warning: Data discontinuity detected in desktop audio\n");
+                Ionia::LogDebugf("[AudioCapture] Warning: Data discontinuity detected in desktop audio\n");
             }
             
             // Release buffer
@@ -715,7 +716,7 @@ void AudioCapture::CaptureThreadMic() {
             
             if (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY) {
                 // Data discontinuity - log but continue
-                fprintf(stderr, "Warning: Data discontinuity detected in microphone audio\n");
+                Ionia::LogDebugf("[AudioCapture] Warning: Data discontinuity detected in microphone audio\n");
             }
             
             // Release buffer
@@ -752,8 +753,8 @@ void AudioCapture::ConvertToFloat32(
         }
     } else {
         // Unsupported format
-        fprintf(stderr, "ConvertToFloat32: unsupported format - tag=%d, bits=%d\n",
-                inFormat->wFormatTag, inFormat->wBitsPerSample);
+        Ionia::LogErrorf("[AudioCapture] ConvertToFloat32: unsupported format - tag=%d, bits=%d\n",
+            inFormat->wFormatTag, inFormat->wBitsPerSample);
         outFloat.clear();
     }
 }
@@ -818,8 +819,8 @@ void AudioCapture::ResampleToTarget(
     // Debug log (first few times only)
     static int resampleLogCount = 0;
     if (resampleLogCount < 3) {
-        fprintf(stderr, "ResampleToTarget: %u frames @ %u Hz -> %u frames @ %u Hz (ratio=%.6f)\n",
-                inFrames, inRate, outFrames, TARGET_SAMPLE_RATE, ratio);
+        Ionia::LogDebugf("[AudioCapture] ResampleToTarget: %u frames @ %u Hz -> %u frames @ %u Hz (ratio=%.6f)\n",
+            inFrames, inRate, outFrames, TARGET_SAMPLE_RATE, ratio);
         resampleLogCount++;
     }
 }
@@ -904,18 +905,18 @@ void AudioCapture::ProcessAudioFrame(
     // CRITICAL VERIFICATION: outFrame.numFrames MUST equal resampledFrames
     // If not, we're using wrong frame count somewhere
     if (outFrame.numFrames != resampledFrames) {
-        fprintf(stderr, "ERROR: ProcessAudioFrame frame mismatch! resampledFrames=%u, outFrame.numFrames=%u\n",
-                resampledFrames, outFrame.numFrames);
+        Ionia::LogErrorf("[AudioCapture] ERROR: ProcessAudioFrame frame mismatch! resampledFrames=%u, outFrame.numFrames=%u\n",
+            resampledFrames, outFrame.numFrames);
     }
     
     // Debug log (first few times only)
     static int processLogCount = 0;
     if (processLogCount < 3) {
-        fprintf(stderr, "ProcessAudioFrame: %u frames @ %u Hz, %u ch -> %u frames @ %u Hz, %u ch\n",
-                inFrames, inFormat->nSamplesPerSec, inFormat->nChannels,
-                outFrame.numFrames, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
-        fprintf(stderr, "  VERIFY: inFrames=%u, resampledFrames=%u, outFrame.numFrames=%u (should be equal)\n",
-                inFrames, resampledFrames, outFrame.numFrames);
+        Ionia::LogDebugf("[AudioCapture] ProcessAudioFrame: %u frames @ %u Hz, %u ch -> %u frames @ %u Hz, %u ch\n",
+            inFrames, inFormat->nSamplesPerSec, inFormat->nChannels,
+            outFrame.numFrames, TARGET_SAMPLE_RATE, TARGET_CHANNELS);
+        Ionia::LogDebugf("[AudioCapture]   VERIFY: inFrames=%u, resampledFrames=%u, outFrame.numFrames=%u (should be equal)\n",
+            inFrames, resampledFrames, outFrame.numFrames);
         processLogCount++;
     }
 }

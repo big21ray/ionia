@@ -12,6 +12,7 @@
 #include "audio_encoder.h"
 #include "encoded_audio_packet.h"
 #include "wasapi_video_engine.h"
+#include "ionia_logging.h"
 
 #include <windows.h>
 #include <comdef.h>
@@ -149,7 +150,7 @@ Napi::Value VideoAudioRecorderAddon::Initialize(const Napi::CallbackInfo& info) 
     bool comInSTAMode = false;
     if (hr == RPC_E_CHANGED_MODE) {
         comInSTAMode = true;
-        fprintf(stderr, "[VideoAudioRecorder] COM is in STA mode (RPC_E_CHANGED_MODE)\n");
+        Ionia::LogDebugf("[VideoAudioRecorder] COM is in STA mode (RPC_E_CHANGED_MODE)\n");
     } else if (hr == S_OK) {
         m_comInitialized = true;
     }

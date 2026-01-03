@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <algorithm>
 
+#include "ionia_logging.h"
+
 VideoEngine::VideoEngine()
     : m_frameBuffer(BUFFER_SIZE)
 {
@@ -14,7 +16,7 @@ VideoEngine::~VideoEngine() {
 
 bool VideoEngine::Initialize(uint32_t fps, VideoEncoder* videoEncoder) {
     if (!videoEncoder || fps == 0) {
-        fprintf(stderr, "[VideoEngine] Invalid params: encoder=%p, fps=%u\n", videoEncoder, fps);
+        Ionia::LogErrorf("[VideoEngine] Invalid params: encoder=%p, fps=%u\n", videoEncoder, fps);
         return false;
     }
 
@@ -26,7 +28,7 @@ bool VideoEngine::Initialize(uint32_t fps, VideoEncoder* videoEncoder) {
     uint32_t w = 0, h = 0;
     m_videoEncoder->GetDimensions(&w, &h);
     if (w == 0 || h == 0) {
-        fprintf(stderr, "[VideoEngine] Invalid encoder dimensions: %ux%u\n", w, h);
+        Ionia::LogErrorf("[VideoEngine] Invalid encoder dimensions: %ux%u\n", w, h);
         return false;
     }
 
@@ -47,7 +49,7 @@ bool VideoEngine::Initialize(uint32_t fps, VideoEncoder* videoEncoder) {
     m_hasLastFrame = false;
     m_lastFrameIndex = 0;
 
-    fprintf(stderr, "[VideoEngine] Initialized: %u fps, encoder=%p\n", m_fps, m_videoEncoder);
+    Ionia::LogInfof("[VideoEngine] Initialized: %u fps, encoder=%p\n", m_fps, m_videoEncoder);
     return true;
 }
 
@@ -58,14 +60,14 @@ void VideoEngine::Start() {
     m_frameNumber = 0;
     m_framesEncoded = 0;
     m_framesDuplicated = 0;
-    fprintf(stderr, "[VideoEngine] Started\n");
+    Ionia::LogInfof("[VideoEngine] Started\n");
 }
 
 void VideoEngine::Stop() {
     std::lock_guard<std::mutex> lock(m_mutex);
     m_isRunning = false;
-    fprintf(stderr, "[VideoEngine] Stopped (encoded=%llu, duplicated=%llu)\n", 
-            m_framesEncoded, m_framesDuplicated);
+    Ionia::LogInfof("[VideoEngine] Stopped (encoded=%llu, duplicated=%llu)\n",
+                    m_framesEncoded, m_framesDuplicated);
 }
 
 bool VideoEngine::PushFrame(const uint8_t* frameData) {
@@ -142,7 +144,7 @@ double VideoEngine::GetPTSSeconds() const {
 void VideoEngine::Flush() {
     // VideoEngine doesn't do encoding anymore, so nothing to flush internally
     // The recorder handles flushing the encoder
-    fprintf(stderr, "[VideoEngine] Flush called\n");
+    Ionia::LogDebugf("[VideoEngine] Flush called\n");
 }
 
 uint64_t VideoEngine::GetExpectedFrameNumber() const {

@@ -1,6 +1,7 @@
 #include "video_muxer.h"
 #include "video_encoder.h"
 #include "encoded_audio_packet.h"
+#include "ionia_logging.h"
 #include <libavutil/mem.h>
 #include <cstring>
 #include <cstdio>
@@ -42,13 +43,13 @@ bool VideoMuxer::Initialize(const std::string& outputPath,
     // Allocate output format context
     int ret = avformat_alloc_output_context2(&m_formatContext, nullptr, nullptr, outputPath.c_str());
     if (ret < 0 || !m_formatContext) {
-        fprintf(stderr, "[VideoMuxer] Failed to allocate output context\n");
+        Ionia::LogErrorf("[VideoMuxer] Failed to allocate output context\n");
         return false;
     }
 
     // Setup video stream
     if (!SetupVideoStream(videoEncoder)) {
-        fprintf(stderr, "[VideoMuxer] Failed to setup video stream\n");
+        Ionia::LogErrorf("[VideoMuxer] Failed to setup video stream\n");
         avformat_free_context(m_formatContext);
         m_formatContext = nullptr;
         return false;
@@ -56,7 +57,7 @@ bool VideoMuxer::Initialize(const std::string& outputPath,
 
     // Setup audio stream
     if (!SetupAudioStream(audioSampleRate, audioChannels, audioBitrate)) {
-        fprintf(stderr, "[VideoMuxer] Failed to setup audio stream\n");
+        Ionia::LogErrorf("[VideoMuxer] Failed to setup audio stream\n");
         avformat_free_context(m_formatContext);
         m_formatContext = nullptr;
         return false;
@@ -68,7 +69,7 @@ bool VideoMuxer::Initialize(const std::string& outputPath,
         if (ret < 0) {
             char errbuf[256];
             av_strerror(ret, errbuf, sizeof(errbuf));
-            fprintf(stderr, "[VideoMuxer] Failed to open output file: %s\n", errbuf);
+            Ionia::LogErrorf("[VideoMuxer] Failed to open output file: %s\n", errbuf);
             avformat_free_context(m_formatContext);
             m_formatContext = nullptr;
             return false;
@@ -89,7 +90,7 @@ bool VideoMuxer::Initialize(const std::string& outputPath,
     if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[VideoMuxer] Failed to write header: %s\n", errbuf);
+        Ionia::LogErrorf("[VideoMuxer] Failed to write header: %s\n", errbuf);
         if (!(m_formatContext->oformat->flags & AVFMT_NOFILE)) {
             avio_closep(&m_formatContext->pb);
         }
@@ -110,7 +111,7 @@ bool VideoMuxer::Initialize(const std::string& outputPath,
     m_totalBytes = 0;
 
     m_initialized = true;
-    fprintf(stderr, "[VideoMuxer] Initialized: %s\n", outputPath.c_str());
+    Ionia::LogInfof("[VideoMuxer] Initialized: %s\n", outputPath.c_str());
     return true;
 }
 
@@ -165,7 +166,7 @@ bool VideoMuxer::SetupVideoStream(VideoEncoder* videoEncoder) {
     // Free codec context (we don't need it for encoding, just for parameters)
     avcodec_free_context(&codecContext);
 
-    fprintf(stderr, "[VideoMuxer] Video stream setup: %ux%u @ %u fps, time_base=%d/%d\n",
+        Ionia::LogDebugf("[VideoMuxer] Video stream setup: %ux%u @ %u fps, time_base=%d/%d\n",
             width, height, fps, m_videoStream->time_base.num, m_videoStream->time_base.den);
 
     return true;
@@ -232,7 +233,7 @@ bool VideoMuxer::WriteVideoPacket(const void* packetPtr, int64_t frameIndex) {
 
     // Validate frame index
     if (frameIndex < 0) {
-        fprintf(stderr, "[VideoMuxer] ERROR: Invalid frame index %lld\n", frameIndex);
+        Ionia::LogErrorf("[VideoMuxer] ERROR: Invalid frame index %lld\n", frameIndex);
         return false;
     }
 
@@ -261,8 +262,8 @@ bool VideoMuxer::WriteVideoPacket(const void* packetPtr, int64_t frameIndex) {
     
     // CRITICAL: Verify timestamps are set correctly before writing
     if (avPacket->pts == AV_NOPTS_VALUE || avPacket->dts == AV_NOPTS_VALUE || avPacket->pts < 0 || avPacket->dts < 0) {
-        fprintf(stderr, "[VideoMuxer] FATAL: Invalid timestamps after setting! frameIndex=%lld avPacket->pts=%lld avPacket->dts=%lld\n",
-                frameIndex, avPacket->pts, avPacket->dts);
+        Ionia::LogErrorf("[VideoMuxer] FATAL: Invalid timestamps after setting! frameIndex=%lld avPacket->pts=%lld avPacket->dts=%lld\n",
+            frameIndex, avPacket->pts, avPacket->dts);
         av_packet_free(&avPacket);
         return false;
     }
@@ -280,8 +281,8 @@ bool VideoMuxer::WriteVideoPacket(const void* packetPtr, int64_t frameIndex) {
     
     // Verify timestamps are still valid after rescale
     if (avPacket->pts == AV_NOPTS_VALUE || avPacket->dts == AV_NOPTS_VALUE || avPacket->pts < 0 || avPacket->dts < 0) {
-        fprintf(stderr, "[VideoMuxer] FATAL: Timestamps became invalid after rescale! frameIndex=%lld avPacket->pts=%lld avPacket->dts=%lld\n",
-                frameIndex, avPacket->pts, avPacket->dts);
+        Ionia::LogErrorf("[VideoMuxer] FATAL: Timestamps became invalid after rescale! frameIndex=%lld avPacket->pts=%lld avPacket->dts=%lld\n",
+            frameIndex, avPacket->pts, avPacket->dts);
         av_packet_free(&avPacket);
         return false;
     }
@@ -296,7 +297,7 @@ bool VideoMuxer::WriteVideoPacket(const void* packetPtr, int64_t frameIndex) {
     if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[VideoMuxer] WriteVideoPacket failed: %s\n", errbuf);
+        Ionia::LogErrorf("[VideoMuxer] WriteVideoPacket failed: %s\n", errbuf);
         return false;
     }
 
@@ -371,7 +372,7 @@ bool VideoMuxer::WriteAudioPacket(const EncodedAudioPacket& packet) {
     if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[VideoMuxer] WriteAudioPacket failed: %s\n", errbuf);
+        Ionia::LogErrorf("[VideoMuxer] WriteAudioPacket failed: %s\n", errbuf);
         return false;
     }
 
@@ -388,9 +389,9 @@ bool VideoMuxer::Finalize() {
         return false;
     }
 
-    fprintf(stderr, "[VideoMuxer] Finalize: video=%llu packets, audio=%llu packets, bytes=%llu\n",
+        Ionia::LogInfof("[VideoMuxer] Finalize: video=%llu packets, audio=%llu packets, bytes=%llu\n",
             m_videoPacketCount, m_audioPacketCount, m_totalBytes);
-    fprintf(stderr, "[VideoMuxer] Last video PTS: %lld, Last video DTS: %lld, Frame count: %lld\n",
+        Ionia::LogDebugf("[VideoMuxer] Last video PTS: %lld, Last video DTS: %lld, Frame count: %lld\n",
             m_lastVideoPTS, m_lastVideoDTS, m_videoFrameCount);
 
     // CRITICAL: FFmpeg may have modified the stream's time_base after writing packets
@@ -436,16 +437,16 @@ bool VideoMuxer::Finalize() {
             m_formatContext->duration = formatDuration;
         }
         
-        fprintf(stderr, "[VideoMuxer] Video stream duration: %lld frames (%.6f seconds)\n",
-                durationInOriginalTimeBase, durationSeconds);
+        Ionia::LogDebugf("[VideoMuxer] Video stream duration: %lld frames (%.6f seconds)\n",
+            durationInOriginalTimeBase, durationSeconds);
         
         // Debug: verify calculation
         if (durationSeconds < 1.0) {
-            fprintf(stderr, "[VideoMuxer] WARNING: Duration is very short (%.6f seconds). Check if all frames were written.\n",
+            Ionia::LogDebugf("[VideoMuxer] WARNING: Duration is very short (%.6f seconds). Check if all frames were written.\n",
                     durationSeconds);
         }
     } else {
-        fprintf(stderr, "[VideoMuxer] WARNING: Cannot calculate duration - m_lastVideoPTS=%lld\n", m_lastVideoPTS);
+        Ionia::LogDebugf("[VideoMuxer] WARNING: Cannot calculate duration - m_lastVideoPTS=%lld\n", m_lastVideoPTS);
     }
 
     // Write trailer (this will finalize the file and write duration metadata)
@@ -453,7 +454,7 @@ bool VideoMuxer::Finalize() {
     if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[VideoMuxer] Failed to write trailer: %s\n", errbuf);
+        Ionia::LogErrorf("[VideoMuxer] Failed to write trailer: %s\n", errbuf);
     }
 
     // Close output file

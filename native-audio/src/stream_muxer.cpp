@@ -2,6 +2,7 @@
 #include "stream_buffer.h"   // 🔥 THIS IS REQUIRED
 #include "video_encoder.h"
 #include "encoded_audio_packet.h"
+#include "ionia_logging.h"
 
 
 extern "C" {
@@ -519,15 +520,13 @@ bool StreamMuxer::Initialize(const std::string& rtmpUrl,
         m_headerWritten = true;
 
         if (m_videoStream && m_audioStream) {
-            fprintf(stderr,
-                    "[StreamMuxer] Post-header time_base: video={%d/%d} audio={%d/%d}\n",
-                    m_videoStream->time_base.num, m_videoStream->time_base.den,
-                    m_audioStream->time_base.num, m_audioStream->time_base.den);
-            fflush(stderr);
+            Ionia::LogInfof(
+                "[StreamMuxer] Post-header time_base: video={%d/%d} audio={%d/%d}\n",
+                m_videoStream->time_base.num, m_videoStream->time_base.den,
+                m_audioStream->time_base.num, m_audioStream->time_base.den);
         }
     } else {
-        fprintf(stderr, "[StreamMuxer] Deferring avformat_write_header until H.264 avcC is available\n");
-        fflush(stderr);
+        Ionia::LogInfof("[StreamMuxer] Deferring avformat_write_header until H.264 avcC is available\n");
     }
 
     // Provide time_base info to the StreamBuffer.
@@ -590,8 +589,7 @@ bool StreamMuxer::SetupVideoStream(VideoEncoder* encoder) {
         // If extradata already looks like avcC (starts with 0x01), copy it directly.
         if (ed_size >= 7 && ed[0] == 0x01) {
             if (StartsWithAnnexBStartCode(ed, (size_t)ed_size) || AvcCHasAnnexBInNalUnits(ed, (size_t)ed_size)) {
-                fprintf(stderr, "[FATAL] Encoder extradata claims avcC but contains Annex-B start codes\n");
-                fflush(stderr);
+                Ionia::LogErrorf("[FATAL] Encoder extradata claims avcC but contains Annex-B start codes\n");
                 abort();
             }
 
@@ -614,8 +612,7 @@ bool StreamMuxer::SetupVideoStream(VideoEncoder* encoder) {
                 std::vector<uint8_t> avcC = BuildAvcC(spsList, ppsList);
                 if (!avcC.empty()) {
                     if (StartsWithAnnexBStartCode(avcC.data(), avcC.size()) || AvcCHasAnnexBInNalUnits(avcC.data(), avcC.size())) {
-                        fprintf(stderr, "[FATAL] Built avcC extradata contains Annex-B start codes\n");
-                        fflush(stderr);
+                        Ionia::LogErrorf("[FATAL] Built avcC extradata contains Annex-B start codes\n");
                         abort();
                     }
 
@@ -659,8 +656,7 @@ bool StreamMuxer::SetupAudioStream(uint32_t rate, uint16_t ch, uint32_t br) {
     m_audioCodecContext->bit_rate = br;
     m_audioCodecContext->time_base = {1,(int)rate};
 
-    fprintf(stderr, "[SetupAudioStream] Setting time_base to {1, %d} for sample rate %d\n", rate, rate);
-    fflush(stderr);
+    Ionia::LogDebugf("[SetupAudioStream] Setting time_base to {1, %d} for sample rate %d\n", rate, rate);
 
     avcodec_parameters_from_context(
         m_audioStream->codecpar, m_audioCodecContext);
@@ -668,8 +664,7 @@ bool StreamMuxer::SetupAudioStream(uint32_t rate, uint16_t ch, uint32_t br) {
     // Provide AAC AudioSpecificConfig as codec extradata so the FLV muxer can emit
     // the proper AAC sequence header (AudioSpecificConfig) automatically.
     if (!SetAacAudioSpecificConfigExtradata(m_audioStream, (int)rate, (int)ch)) {
-        fprintf(stderr, "[SetupAudioStream] Failed to set AAC AudioSpecificConfig extradata\n");
-        fflush(stderr);
+        Ionia::LogErrorf("[SetupAudioStream] Failed to set AAC AudioSpecificConfig extradata\n");
         return false;
     }
 
@@ -700,8 +695,7 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex)
     if (inputIsAnnexB) {
         convertedAvcc = AnnexBToAvcc(payload, payloadSize);
         if (convertedAvcc.empty()) {
-            fprintf(stderr, "[StreamMuxer] AnnexBToAvcc failed (size=%zu)\n", payloadSize);
-            fflush(stderr);
+            Ionia::LogErrorf("[StreamMuxer] AnnexBToAvcc failed (size=%zu)\n", payloadSize);
             return false;
         }
         payload = convertedAvcc.data();
@@ -720,8 +714,7 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex)
                 std::vector<uint8_t> avcC = BuildAvcC(spsList, ppsList);
                 if (!avcC.empty()) {
                     if (StartsWithAnnexBStartCode(avcC.data(), avcC.size()) || AvcCHasAnnexBInNalUnits(avcC.data(), avcC.size())) {
-                        fprintf(stderr, "[StreamMuxer] Built avcC extradata invalid (contains Annex-B)\n");
-                        fflush(stderr);
+                        Ionia::LogErrorf("[StreamMuxer] Built avcC extradata invalid (contains Annex-B)\n");
                         return false;
                     }
                     (void)SetCodecparExtradata(m_videoStream->codecpar, avcC.data(), avcC.size());
@@ -732,19 +725,17 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex)
         const bool ready = (m_videoStream && m_videoStream->codecpar && m_videoStream->codecpar->extradata_size > 0);
         if (ready) {
             if (avformat_write_header(m_formatContext, nullptr) < 0) {
-                fprintf(stderr, "[StreamMuxer] avformat_write_header failed (deferred)\n");
-                fflush(stderr);
+                Ionia::LogErrorf("[StreamMuxer] avformat_write_header failed (deferred)\n");
                 m_isConnected = false;
                 return false;
             }
             m_headerWritten = true;
 
             if (m_videoStream && m_audioStream) {
-                fprintf(stderr,
-                        "[StreamMuxer] Post-header time_base: video={%d/%d} audio={%d/%d}\n",
-                        m_videoStream->time_base.num, m_videoStream->time_base.den,
-                        m_audioStream->time_base.num, m_audioStream->time_base.den);
-                fflush(stderr);
+                Ionia::LogInfof(
+                    "[StreamMuxer] Post-header time_base: video={%d/%d} audio={%d/%d}\n",
+                    m_videoStream->time_base.num, m_videoStream->time_base.den,
+                    m_audioStream->time_base.num, m_audioStream->time_base.den);
             }
 
             if (m_buffer && m_videoStream && m_audioStream) {
@@ -799,8 +790,7 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex)
         if (ret < 0) {
             char errbuf[256];
             av_strerror(ret, errbuf, sizeof(errbuf));
-            fprintf(stderr, "[StreamMuxer] WriteVideoPacket failed: %s\n", errbuf);
-            fflush(stderr);
+            Ionia::LogErrorf("[StreamMuxer] WriteVideoPacket failed: %s\n", errbuf);
             m_isConnected = false;
             return false;
         }
@@ -865,8 +855,7 @@ bool StreamMuxer::WriteAudioPacket(const EncodedAudioPacket& p) {
         if (ret < 0) {
             char errbuf[256];
             av_strerror(ret, errbuf, sizeof(errbuf));
-            fprintf(stderr, "[StreamMuxer] WriteAudioPacket av_interleaved_write_frame failed: %s\n", errbuf);
-            fflush(stderr);
+            Ionia::LogErrorf("[StreamMuxer] WriteAudioPacket av_interleaved_write_frame failed: %s\n", errbuf);
             m_isConnected = false;
             return false;
         }
@@ -968,8 +957,7 @@ bool StreamMuxer::SendNextBufferedPacket() {
     if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[StreamMuxer] SendNextBufferedPacket av_interleaved_write_frame failed: %s\n", errbuf);
-        fflush(stderr);
+        Ionia::LogErrorf("[StreamMuxer] SendNextBufferedPacket av_interleaved_write_frame failed: %s\n", errbuf);
         m_isConnected = false;
         return false;
     }

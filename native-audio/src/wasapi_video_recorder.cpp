@@ -2,6 +2,7 @@
 #include "desktop_duplication.h"
 #include "video_encoder.h"
 #include "video_muxer.h"
+#include "ionia_logging.h"
 #include <windows.h>
 #include <comdef.h>
 #include <memory>
@@ -274,7 +275,7 @@ void VideoRecorderAddon::CaptureThread() {
                 // All packets from the same frame have the same PTS and DTS
                 // CRITICAL: m_frameNumber must be valid (>= 0, never AV_NOPTS_VALUE)
                 if (m_frameNumber < 0) {
-                    fprintf(stderr, "[VideoRecorder] ERROR: Invalid frame number %lld, skipping\n", m_frameNumber);
+                    Ionia::LogErrorf("[VideoRecorder] ERROR: Invalid frame number %lld, skipping\n", m_frameNumber);
                     continue;
                 }
                 

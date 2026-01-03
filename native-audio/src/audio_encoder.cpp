@@ -1,5 +1,6 @@
 #include "audio_encoder.h"
 #include "encoded_audio_packet.h"
+#include "ionia_logging.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -131,8 +132,7 @@ std::vector<EncodedAudioPacket> AudioEncoder::EncodeFrames(const float* pcmData,
     
     // Verify we got exactly the expected frame size
     if (numFrames != frameSize) {
-        fprintf(stderr, "[AudioEncoder] WARNING: Got %u frames, expected %u\n", numFrames, frameSize);
-        fflush(stderr);
+        Ionia::LogDebugf("[AudioEncoder] WARNING: Got %u frames, expected %u\n", numFrames, frameSize);
     }
 
     // Make frame writable
@@ -159,8 +159,7 @@ std::vector<EncodedAudioPacket> AudioEncoder::EncodeFrames(const float* pcmData,
     // Send frame to encoder
     ret = avcodec_send_frame(m_codecContext, m_frame);
     if (ret < 0) {
-        fprintf(stderr, "[AudioEncoder] avcodec_send_frame failed: %d\n", ret);
-        fflush(stderr);
+        Ionia::LogErrorf("[AudioEncoder] avcodec_send_frame failed: %d\n", ret);
         return packets;
     }
 

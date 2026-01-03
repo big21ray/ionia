@@ -10,6 +10,8 @@ extern "C" {
 #include <cstring>
 #include <cstdio>
 
+#include "ionia_logging.h"
+
 VideoEncoder::VideoEncoder()
     : m_initialized(false)
     , m_useNvenc(false)
@@ -44,20 +46,20 @@ bool VideoEncoder::Initialize(uint32_t width, uint32_t height, uint32_t fps, uin
 
     // Initialize codec (pass COM mode information)
     if (!InitializeCodec(useNvenc, comInSTAMode)) {
-        fprintf(stderr, "[VideoEncoder] Failed to initialize codec\n");
+        Ionia::LogErrorf("[VideoEncoder] Failed to initialize codec\n");
         return false;
     }
 
     // Allocate frame
     if (!AllocateFrame()) {
-        fprintf(stderr, "[VideoEncoder] Failed to allocate frame\n");
+        Ionia::LogErrorf("[VideoEncoder] Failed to allocate frame\n");
         Cleanup();
         return false;
     }
 
     m_initialized = true;
-    fprintf(stderr, "[VideoEncoder] Initialized: %ux%u @ %u fps, %u bps, codec=%s\n",
-            m_width, m_height, m_fps, m_bitrate, GetCodecName().c_str());
+    Ionia::LogInfof("[VideoEncoder] Initialized: %ux%u @ %u fps, %u bps, codec=%s\n",
+                    m_width, m_height, m_fps, m_bitrate, GetCodecName().c_str());
     return true;
 }
 
@@ -71,7 +73,7 @@ static bool IsCOMInSTAMode() {
     
     if (hr == RPC_E_CHANGED_MODE) {
         // COM is already initialized in STA mode - we can't change it
-        fprintf(stderr, "[VideoEncoder] COM mode check: STA mode detected (RPC_E_CHANGED_MODE)\n");
+        Ionia::LogDebugf("[VideoEncoder] COM mode check: STA mode detected (RPC_E_CHANGED_MODE)\n");
         return true;
     }
     
@@ -79,9 +81,9 @@ static bool IsCOMInSTAMode() {
     // If COM was already initialized in MTA mode (S_FALSE), we don't need to uninitialize
     if (hr == S_OK) {
         CoUninitialize();
-        fprintf(stderr, "[VideoEncoder] COM mode check: MTA mode (initialized successfully)\n");
+        Ionia::LogDebugf("[VideoEncoder] COM mode check: MTA mode (initialized successfully)\n");
     } else if (hr == S_FALSE) {
-        fprintf(stderr, "[VideoEncoder] COM mode check: MTA mode (already initialized)\n");
+        Ionia::LogDebugf("[VideoEncoder] COM mode check: MTA mode (already initialized)\n");
     }
     
     // COM is in MTA mode (or can be initialized in MTA mode)
@@ -91,16 +93,16 @@ static bool IsCOMInSTAMode() {
 bool VideoEncoder::InitializeCodec(bool useNvenc, bool comInSTAMode) {
     // Use the provided COM mode information (checked before AudioCapture could change it)
     if (comInSTAMode) {
-        fprintf(stderr, "[VideoEncoder] COM is in STA mode (passed from VideoAudioRecorder) - will avoid h264_mf codec\n");
+        Ionia::LogInfof("[VideoEncoder] COM is in STA mode (passed from VideoAudioRecorder) - will avoid h264_mf codec\n");
     } else {
         // Double-check COM mode in case it wasn't passed correctly
-        fprintf(stderr, "[VideoEncoder] Checking COM mode (fallback check)...\n");
+        Ionia::LogDebugf("[VideoEncoder] Checking COM mode (fallback check)...\n");
         bool detectedSTAMode = IsCOMInSTAMode();
         if (detectedSTAMode) {
-            fprintf(stderr, "[VideoEncoder] WARNING: COM detected as STA mode (but was passed as MTA) - using STA mode\n");
+            Ionia::LogInfof("[VideoEncoder] WARNING: COM detected as STA mode (but was passed as MTA) - using STA mode\n");
             comInSTAMode = true;
         } else {
-            fprintf(stderr, "[VideoEncoder] COM is in MTA mode - h264_mf can be used\n");
+            Ionia::LogDebugf("[VideoEncoder] COM is in MTA mode - h264_mf can be used\n");
         }
     }
     
@@ -109,9 +111,9 @@ bool VideoEncoder::InitializeCodec(bool useNvenc, bool comInSTAMode) {
     if (useNvenc) {
         m_codec = avcodec_find_encoder_by_name("h264_nvenc");
         if (m_codec) {
-            fprintf(stderr, "[VideoEncoder] Using NVENC encoder (NVIDIA hardware acceleration)\n");
+            Ionia::LogInfof("[VideoEncoder] Using NVENC encoder (NVIDIA hardware acceleration)\n");
         } else {
-            fprintf(stderr, "[VideoEncoder] NVENC not available (no NVIDIA GPU or drivers), falling back to x264\n");
+            Ionia::LogInfof("[VideoEncoder] NVENC not available (no NVIDIA GPU or drivers), falling back to x264\n");
             useNvenc = false;
         }
     }
@@ -129,17 +131,17 @@ bool VideoEncoder::InitializeCodec(bool useNvenc, bool comInSTAMode) {
         for (int i = 0; x264_names[i] != nullptr; i++) {
             m_codec = avcodec_find_encoder_by_name(x264_names[i]);
             if (m_codec) {
-                fprintf(stderr, "[VideoEncoder] Using %s encoder\n", x264_names[i]);
+                Ionia::LogInfof("[VideoEncoder] Using %s encoder\n", x264_names[i]);
                 break;
             }
         }
         
         // If x264 not found, try generic H.264 but check for h264_mf
         if (!m_codec) {
-            fprintf(stderr, "[VideoEncoder] x264 encoders not found, trying generic H.264...\n");
+            Ionia::LogInfof("[VideoEncoder] x264 encoders not found, trying generic H.264...\n");
             m_codec = avcodec_find_encoder(AV_CODEC_ID_H264);
             if (!m_codec) {
-                fprintf(stderr, "[VideoEncoder] H.264 encoder not found\n");
+                Ionia::LogErrorf("[VideoEncoder] H.264 encoder not found\n");
                 return false;
             }
             
@@ -147,32 +149,28 @@ bool VideoEncoder::InitializeCodec(bool useNvenc, bool comInSTAMode) {
             if (m_codec && strstr(m_codec->name, "mf") != nullptr) {
                 if (comInSTAMode) {
                     // COM is in STA mode and we got h264_mf - this will fail, so reject it
-                    fprintf(stderr, "[VideoEncoder] ERROR: Found h264_mf but COM is in STA mode!\n");
-                    fprintf(stderr, "[VideoEncoder] h264_mf requires MTA mode and cannot be used in Electron.\n");
-                    fprintf(stderr, "[VideoEncoder] \n");
-                    fprintf(stderr, "[VideoEncoder] SOLUTION: Install FFmpeg with libx264 support\n");
-                    fprintf(stderr, "[VideoEncoder] \n");
-                    fprintf(stderr, "[VideoEncoder] Option 1 - Using vcpkg (recommended):\n");
-                    fprintf(stderr, "[VideoEncoder]   cd C:\\vcpkg\n");
-                    fprintf(stderr, "[VideoEncoder]   .\\vcpkg install ffmpeg[nonfree]:x64-windows\n");
-                    fprintf(stderr, "[VideoEncoder]   (libx264 is included in nonfree variant)\n");
-                    fprintf(stderr, "[VideoEncoder] \n");
-                    fprintf(stderr, "[VideoEncoder] Option 2 - Download pre-built FFmpeg:\n");
-                    fprintf(stderr, "[VideoEncoder]   Download from https://www.gyan.dev/ffmpeg/builds/\n");
-                    fprintf(stderr, "[VideoEncoder]   Make sure it includes libx264 (check with: ffmpeg -encoders | findstr x264)\n");
-                    fprintf(stderr, "[VideoEncoder]   Copy the DLLs to native-audio/build/Release/\n");
-                    fprintf(stderr, "[VideoEncoder] \n");
-                    fprintf(stderr, "[VideoEncoder] After installing, rebuild the native module:\n");
-                    fprintf(stderr, "[VideoEncoder]   cd native-audio\n");
-                    fprintf(stderr, "[VideoEncoder]   npm run build\n");
+                    Ionia::LogErrorf("[VideoEncoder] ERROR: Found h264_mf but COM is in STA mode!\n");
+                    Ionia::LogErrorf("[VideoEncoder] h264_mf requires MTA mode and cannot be used in Electron.\n");
+                    Ionia::LogErrorf("[VideoEncoder] SOLUTION: Install FFmpeg with libx264 support\n");
+                    Ionia::LogErrorf("[VideoEncoder] Option 1 - Using vcpkg (recommended):\n");
+                    Ionia::LogErrorf("[VideoEncoder]   cd C:\\vcpkg\n");
+                    Ionia::LogErrorf("[VideoEncoder]   .\\vcpkg install ffmpeg[nonfree]:x64-windows\n");
+                    Ionia::LogErrorf("[VideoEncoder]   (libx264 is included in nonfree variant)\n");
+                    Ionia::LogErrorf("[VideoEncoder] Option 2 - Download pre-built FFmpeg:\n");
+                    Ionia::LogErrorf("[VideoEncoder]   Download from https://www.gyan.dev/ffmpeg/builds/\n");
+                    Ionia::LogErrorf("[VideoEncoder]   Make sure it includes libx264 (check with: ffmpeg -encoders | findstr x264)\n");
+                    Ionia::LogErrorf("[VideoEncoder]   Copy the DLLs to native-audio/build/Release/\n");
+                    Ionia::LogErrorf("[VideoEncoder] After installing, rebuild the native module:\n");
+                    Ionia::LogErrorf("[VideoEncoder]   cd native-audio\n");
+                    Ionia::LogErrorf("[VideoEncoder]   npm run build\n");
                     m_codec = nullptr;
                     return false;
                 } else {
                     // COM is in MTA mode, h264_mf should work
-                    fprintf(stderr, "[VideoEncoder] Using h264_mf encoder (COM is in MTA mode)\n");
+                    Ionia::LogInfof("[VideoEncoder] Using h264_mf encoder (COM is in MTA mode)\n");
                 }
             } else {
-                fprintf(stderr, "[VideoEncoder] Using generic H.264 encoder: %s\n", m_codec ? m_codec->name : "unknown");
+                Ionia::LogInfof("[VideoEncoder] Using generic H.264 encoder: %s\n", m_codec ? m_codec->name : "unknown");
             }
         }
     }
@@ -180,7 +178,7 @@ bool VideoEncoder::InitializeCodec(bool useNvenc, bool comInSTAMode) {
     // Allocate codec context
     m_codecContext = avcodec_alloc_context3(m_codec);
     if (!m_codecContext) {
-        fprintf(stderr, "[VideoEncoder] Failed to allocate codec context\n");
+        Ionia::LogErrorf("[VideoEncoder] Failed to allocate codec context\n");
         return false;
     }
 
@@ -212,7 +210,7 @@ bool VideoEncoder::InitializeCodec(bool useNvenc, bool comInSTAMode) {
     if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[VideoEncoder] Failed to open codec: %s\n", errbuf);
+        Ionia::LogErrorf("[VideoEncoder] Failed to open codec: %s\n", errbuf);
         avcodec_free_context(&m_codecContext);
         return false;
     }
@@ -256,7 +254,7 @@ void VideoEncoder::ConvertRGBAtoYUV(const uint8_t* rgbaData, AVFrame* frame) {
             SWS_BILINEAR, nullptr, nullptr, nullptr
         );
         if (!swsContext) {
-            fprintf(stderr, "[VideoEncoder] Failed to create swscale context\n");
+            Ionia::LogErrorf("[VideoEncoder] Failed to create swscale context\n");
             return;
         }
     }
@@ -278,7 +276,7 @@ std::vector<VideoEncoder::EncodedPacket> VideoEncoder::EncodeFrame(const uint8_t
     // Make frame writable
     int ret = av_frame_make_writable(m_frame);
     if (ret < 0) {
-        fprintf(stderr, "[VideoEncoder] Failed to make frame writable\n");
+        Ionia::LogErrorf("[VideoEncoder] Failed to make frame writable\n");
         return packets;
     }
 
@@ -295,7 +293,7 @@ std::vector<VideoEncoder::EncodedPacket> VideoEncoder::EncodeFrame(const uint8_t
     if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[VideoEncoder] avcodec_send_frame failed: %s\n", errbuf);
+        Ionia::LogErrorf("[VideoEncoder] avcodec_send_frame failed: %s\n", errbuf);
         return packets;
     }
 
@@ -310,7 +308,7 @@ std::vector<VideoEncoder::EncodedPacket> VideoEncoder::EncodeFrame(const uint8_t
         if (ret < 0) {
             char errbuf[256];
             av_strerror(ret, errbuf, sizeof(errbuf));
-            fprintf(stderr, "[VideoEncoder] avcodec_receive_packet failed: %s\n", errbuf);
+            Ionia::LogErrorf("[VideoEncoder] avcodec_receive_packet failed: %s\n", errbuf);
             break;
         }
 
@@ -344,7 +342,7 @@ std::vector<VideoEncoder::EncodedPacket> VideoEncoder::Flush() {
     if (ret < 0) {
         char errbuf[256];
         av_strerror(ret, errbuf, sizeof(errbuf));
-        fprintf(stderr, "[VideoEncoder] Flush: avcodec_send_frame failed: %s\n", errbuf);
+        Ionia::LogErrorf("[VideoEncoder] Flush: avcodec_send_frame failed: %s\n", errbuf);
         return packets;
     }
 
@@ -359,7 +357,7 @@ std::vector<VideoEncoder::EncodedPacket> VideoEncoder::Flush() {
         if (ret < 0) {
             char errbuf[256];
             av_strerror(ret, errbuf, sizeof(errbuf));
-            fprintf(stderr, "[VideoEncoder] Flush: avcodec_receive_packet failed: %s\n", errbuf);
+            Ionia::LogErrorf("[VideoEncoder] Flush: avcodec_receive_packet failed: %s\n", errbuf);
             break;
         }
 
@@ -377,7 +375,7 @@ std::vector<VideoEncoder::EncodedPacket> VideoEncoder::Flush() {
         av_packet_unref(m_packet);
     }
 
-    fprintf(stderr, "[VideoEncoder] Flush: returned %zu packets\n", packets.size());
+    Ionia::LogDebugf("[VideoEncoder] Flush: returned %zu packets\n", packets.size());
     return packets;
 }
 

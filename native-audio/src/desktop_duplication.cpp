@@ -2,6 +2,8 @@
 #include <cstring>
 #include <cstdio>
 
+#include "ionia_logging.h"
+
 DesktopDuplication::DesktopDuplication()
     : m_initialized(false)
     , m_desktopWidth(0)
@@ -23,13 +25,13 @@ bool DesktopDuplication::Initialize() {
 
     // Initialize D3D11 + Desktop Duplication (select a valid adapter/output)
     if (!InitializeD3D()) {
-        fprintf(stderr, "[DesktopDuplication] Failed to initialize D3D11/Desktop Duplication\n");
+        Ionia::LogErrorf("[DesktopDuplication] Failed to initialize D3D11/Desktop Duplication\n");
         Cleanup();
         return false;
     }
 
     m_initialized = true;
-    fprintf(stderr, "[DesktopDuplication] Initialized: %ux%u\n", m_desktopWidth, m_desktopHeight);
+    Ionia::LogInfof("[DesktopDuplication] Initialized: %ux%u\n", m_desktopWidth, m_desktopHeight);
     return true;
 }
 
@@ -40,7 +42,7 @@ bool DesktopDuplication::InitializeD3D() {
     ComPtr<IDXGIFactory1> factory;
     hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&factory);
     if (FAILED(hr)) {
-        fprintf(stderr, "[DesktopDuplication] CreateDXGIFactory1 failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[DesktopDuplication] CreateDXGIFactory1 failed: 0x%08X\n", hr);
         return false;
     }
 
@@ -111,7 +113,7 @@ bool DesktopDuplication::InitializeD3D() {
             );
 
             if (FAILED(hr)) {
-                fprintf(stderr, "[DesktopDuplication] D3D11CreateDevice(HARDWARE) failed on adapter %u: 0x%08X, trying UNKNOWN\n", adapterIndex, hr);
+                Ionia::LogDebugf("[DesktopDuplication] D3D11CreateDevice(HARDWARE) failed on adapter %u: 0x%08X, trying UNKNOWN\n", adapterIndex, hr);
                 hr = D3D11CreateDevice(
                     adapter.Get(),
                     D3D_DRIVER_TYPE_UNKNOWN,
@@ -134,7 +136,7 @@ bool DesktopDuplication::InitializeD3D() {
             ComPtr<IDXGIOutputDuplication> deskDupl;
             hr = output1->DuplicateOutput(device.Get(), &deskDupl);
             if (FAILED(hr) || !deskDupl) {
-                fprintf(stderr, "[DesktopDuplication] DuplicateOutput failed on adapter %u output %u: 0x%08X\n", adapterIndex, outputIndex, hr);
+                Ionia::LogDebugf("[DesktopDuplication] DuplicateOutput failed on adapter %u output %u: 0x%08X\n", adapterIndex, outputIndex, hr);
                 continue;
             }
 
@@ -150,15 +152,15 @@ bool DesktopDuplication::InitializeD3D() {
             m_desktopWidth = m_outputDesc.DesktopCoordinates.right - m_outputDesc.DesktopCoordinates.left;
             m_desktopHeight = m_outputDesc.DesktopCoordinates.bottom - m_outputDesc.DesktopCoordinates.top;
 
-            fprintf(stderr, "[DesktopDuplication] Selected adapter %u output %u (%ux%u)\n",
-                adapterIndex, outputIndex, m_desktopWidth, m_desktopHeight);
-            fprintf(stderr, "[DesktopDuplication] D3D device created successfully\n");
+            Ionia::LogInfof("[DesktopDuplication] Selected adapter %u output %u (%ux%u)\n",
+                            adapterIndex, outputIndex, m_desktopWidth, m_desktopHeight);
+            Ionia::LogInfof("[DesktopDuplication] D3D device created successfully\n");
 
             return true;
         }
     }
 
-    fprintf(stderr, "[DesktopDuplication] No usable AttachedToDesktop output found for Desktop Duplication\n");
+    Ionia::LogErrorf("[DesktopDuplication] No usable AttachedToDesktop output found for Desktop Duplication\n");
     return false;
 }
 
@@ -172,7 +174,7 @@ bool DesktopDuplication::InitializeDuplication() {
 
     hr = m_output1->DuplicateOutput(m_device.Get(), &m_deskDupl);
     if (FAILED(hr)) {
-        fprintf(stderr, "[DesktopDuplication] DuplicateOutput failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[DesktopDuplication] DuplicateOutput failed: 0x%08X\n", hr);
         return false;
     }
 
@@ -201,14 +203,14 @@ bool DesktopDuplication::AcquireFrame() {
 
     if (FAILED(hr)) {
         if (hr == DXGI_ERROR_ACCESS_LOST) {
-            fprintf(stderr, "[DesktopDuplication] Access lost, reinitializing...\n");
+            Ionia::LogInfof("[DesktopDuplication] Access lost, reinitializing...\n");
             // Try to reinitialize
             m_deskDupl.Reset();
             if (!InitializeDuplication()) {
                 return false;
             }
         } else {
-            fprintf(stderr, "[DesktopDuplication] AcquireNextFrame failed: 0x%08X\n", hr);
+            Ionia::LogDebugf("[DesktopDuplication] AcquireNextFrame failed: 0x%08X\n", hr);
         }
         return false;
     }
@@ -216,7 +218,7 @@ bool DesktopDuplication::AcquireFrame() {
     // Query texture interface
     hr = desktopResource.As(&m_desktopImage);
     if (FAILED(hr)) {
-        fprintf(stderr, "[DesktopDuplication] QueryInterface ID3D11Texture2D failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[DesktopDuplication] QueryInterface ID3D11Texture2D failed: 0x%08X\n", hr);
         m_deskDupl->ReleaseFrame();
         return false;
     }
@@ -261,7 +263,7 @@ bool DesktopDuplication::CaptureFrame(uint8_t* frameData, uint32_t* width, uint3
 
     HRESULT hr = m_device->CreateTexture2D(&desc, nullptr, &stagingTexture);
     if (FAILED(hr)) {
-        fprintf(stderr, "[DesktopDuplication] CreateTexture2D (staging) failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[DesktopDuplication] CreateTexture2D (staging) failed: 0x%08X\n", hr);
         ReleaseFrame();
         return false;
     }
@@ -273,7 +275,7 @@ bool DesktopDuplication::CaptureFrame(uint8_t* frameData, uint32_t* width, uint3
     D3D11_MAPPED_SUBRESOURCE mapped;
     hr = m_context->Map(stagingTexture.Get(), 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) {
-        fprintf(stderr, "[DesktopDuplication] Map failed: 0x%08X\n", hr);
+        Ionia::LogErrorf("[DesktopDuplication] Map failed: 0x%08X\n", hr);
         ReleaseFrame();
         return false;
     }
