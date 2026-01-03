@@ -53,12 +53,12 @@ private:
     bool SetupVideoStream(VideoEncoder* encoder);
     bool SetupAudioStream(uint32_t sampleRate, uint16_t channels, uint32_t bitrate);
     void SendAACSequenceHeader();
-    void SendAVCSequenceHeader();
     void Cleanup();
 
 private:
     bool m_initialized = false;
     bool m_isConnected = false;
+    bool m_headerWritten = false;
     bool m_dropVideoPackets = false;
     bool m_dropAllPackets = false;
 
