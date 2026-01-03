@@ -1,11 +1,25 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import VideoPlayer from './components/VideoPlayer';
 import FileBrowser from './components/FileBrowser';
 import RecordingButton from './components/RecordingButton';
 import StreamButton from './components/StreamButton';
+import WebVideoPlayer from './components/WebVideoPlayer';
 
 function App() {
   const [videoPath, setVideoPath] = useState<string | null>(null);
+  const [webSrc, setWebSrc] = useState<string | null>(null);
+
+  // Browser-friendly entry point: /player/?src=/vod-raw/live/foo.flv
+  useEffect(() => {
+    try {
+      const src = new URL(window.location.href).searchParams.get('src');
+      if (src) {
+        setWebSrc(src);
+      }
+    } catch {
+      // Ignore invalid URL environments.
+    }
+  }, []);
 
   const toIoniaVideoUrl = (pathOrUrl: string) =>
     `ionia-video://open?path=${encodeURIComponent(pathOrUrl)}`;
@@ -24,6 +38,12 @@ function App() {
     // Covers raw Windows paths and file:// URLs.
     setVideoPath(toIoniaVideoUrl(path));
   };
+
+  const isElectron = typeof window !== 'undefined' && !!(window as any).electronAPI;
+
+  if (webSrc && !isElectron) {
+    return <WebVideoPlayer src={webSrc} />;
+  }
 
   return (
     <div className="w-screen h-screen bg-black overflow-hidden relative">

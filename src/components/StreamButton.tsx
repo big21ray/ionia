@@ -52,6 +52,8 @@ const StreamButton = ({ className = '' }: StreamButtonProps) => {
         // Start streaming with hardcoded YouTube stream key
         const streamKey = '3avj-5j6r-utec-qp7m-86hq';
         const rtmpUrl = `rtmp://a.rtmp.youtube.com/live2/${streamKey}`;
+        // const rtmpUrl = "rtmp://46.224.189.114:19350/live/test4"
+
 
         // Start streaming
         const result = await window.electronAPI?.startStream(rtmpUrl);
