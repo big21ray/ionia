@@ -21,4 +21,4 @@ jobs:
       - name: Deploy nginx
         run: |
           ssh root@46.224.189.114 \
-            "/opt/ionia/infra/scripts/deploy_nginx.sh phase-2-server-setup"
+            "bash /opt/ionia/infra/scripts/deploy_nginx.sh phase-2-server-setup"
