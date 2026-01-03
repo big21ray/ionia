@@ -10,6 +10,132 @@ extern "C" {
 #include <libavutil/time.h>
 }
 
+
+// Validate avcC extradata and ensure SPS/PPS NALs do NOT start with Annex-B start codes.
+// This avoids false positives from length fields containing 00 00 01.
+static bool AvcCHasAnnexBInNalUnits(const uint8_t* p, size_t n)
+{
+    if (!p || n < 7) return true;
+    if (p[0] != 0x01) return true;
+
+    size_t off = 5;
+    if (off >= n) return true;
+    uint8_t numSps = (uint8_t)(p[off] & 0x1F);
+    off += 1;
+    for (uint8_t i = 0; i < numSps; ++i) {
+        if (off + 2 > n) return true;
+        uint16_t len = (uint16_t)p[off] << 8 | (uint16_t)p[off + 1];
+        off += 2;
+        if (len == 0 || off + len > n) return true;
+        if (len >= 3 && p[off] == 0x00 && p[off + 1] == 0x00 && p[off + 2] == 0x01) return true;
+        if (len >= 4 && p[off] == 0x00 && p[off + 1] == 0x00 && p[off + 2] == 0x00 && p[off + 3] == 0x01) return true;
+        off += len;
+    }
+
+    if (off + 1 > n) return true;
+    uint8_t numPps = p[off];
+    off += 1;
+    for (uint8_t i = 0; i < numPps; ++i) {
+        if (off + 2 > n) return true;
+        uint16_t len = (uint16_t)p[off] << 8 | (uint16_t)p[off + 1];
+        off += 2;
+        if (len == 0 || off + len > n) return true;
+        if (len >= 3 && p[off] == 0x00 && p[off + 1] == 0x00 && p[off + 2] == 0x01) return true;
+        if (len >= 4 && p[off] == 0x00 && p[off + 1] == 0x00 && p[off + 2] == 0x00 && p[off + 3] == 0x01) return true;
+        off += len;
+    }
+
+    return false;
+}
+
+static bool StartsWithAnnexBStartCode(const uint8_t* p, size_t n)
+{
+    if (!p || n < 3) return false;
+    if (p[0] != 0x00 || p[1] != 0x00) return false;
+    if (p[2] == 0x01) return true;
+    return (n >= 4 && p[2] == 0x00 && p[3] == 0x01);
+}
+
+static bool SetCodecparExtradata(AVCodecParameters* codecpar, const uint8_t* data, size_t size)
+{
+    if (!codecpar || !data || size == 0) return false;
+
+    if (codecpar->extradata) {
+        av_freep(&codecpar->extradata);
+        codecpar->extradata_size = 0;
+    }
+
+    codecpar->extradata = (uint8_t*)av_malloc(size + AV_INPUT_BUFFER_PADDING_SIZE);
+    if (!codecpar->extradata) return false;
+    memcpy(codecpar->extradata, data, size);
+    memset(codecpar->extradata + size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+    codecpar->extradata_size = (int)size;
+    return true;
+}
+
+// Convert Annex-B (00 00 01 / 00 00 00 01 start-code delimited) H.264 into AVCC
+// (4-byte big-endian length prefixed NAL units). Returns empty on failure.
+static std::vector<uint8_t> AnnexBToAvcc(const uint8_t* data, size_t size)
+{
+    std::vector<uint8_t> out;
+    if (!data || size < 4) return out;
+
+    auto isStartCodeAt = [&](size_t pos, size_t* scLen) -> bool {
+        if (pos + 3 < size && data[pos] == 0x00 && data[pos + 1] == 0x00) {
+            if (data[pos + 2] == 0x01) { *scLen = 3; return true; }
+            if (pos + 4 < size && data[pos + 2] == 0x00 && data[pos + 3] == 0x01) { *scLen = 4; return true; }
+        }
+        return false;
+    };
+
+    // Find the first start code.
+    size_t i = 0;
+    size_t scLen = 0;
+    bool found = false;
+    for (; i + 3 < size; ++i) {
+        if (isStartCodeAt(i, &scLen)) { found = true; break; }
+    }
+    if (!found) return out;
+
+    while (i < size) {
+        // Skip start code
+        if (!isStartCodeAt(i, &scLen)) {
+            ++i;
+            continue;
+        }
+        size_t nalStart = i + scLen;
+
+        // Find next start code
+        size_t j = nalStart;
+        size_t nextScLen = 0;
+        for (; j + 3 < size; ++j) {
+            if (isStartCodeAt(j, &nextScLen)) break;
+        }
+        size_t nalEnd = (j + 3 < size) ? j : size;
+
+        // Trim trailing zero padding
+        while (nalEnd > nalStart && data[nalEnd - 1] == 0x00) {
+            --nalEnd;
+        }
+
+        if (nalEnd > nalStart) {
+            const size_t nalSize = nalEnd - nalStart;
+            if (nalSize <= 0xFFFFFFFFu) {
+                const uint32_t len = (uint32_t)nalSize;
+                out.push_back((len >> 24) & 0xFF);
+                out.push_back((len >> 16) & 0xFF);
+                out.push_back((len >> 8) & 0xFF);
+                out.push_back(len & 0xFF);
+                out.insert(out.end(), data + nalStart, data + nalEnd);
+            }
+        }
+
+        i = nalEnd;
+    }
+
+    return out;
+}
+
 #include <cstring>
 #include <cstdio>
 #include <vector>
@@ -43,6 +169,7 @@ static int AacSampleRateIndex(int sampleRate) {
         default:    return -1;
     }
 }
+
 
 static bool SetAacAudioSpecificConfigExtradata(AVStream* stream, int sampleRate, int channels) {
     if (!stream || !stream->codecpar) return false;
@@ -117,17 +244,56 @@ static void ExtractSpsPpsFromH264(const uint8_t* data, int size,
             i = nalEnd;
         }
     } else {
-        // Assume length-prefixed NAL units (4-byte big-endian length)
-        int pos = 0;
-        while (pos + 4 <= size) {
-            uint32_t nalLen = (uint32_t)data[pos] << 24 | (uint32_t)data[pos+1] << 16 | (uint32_t)data[pos+2] << 8 | (uint32_t)data[pos+3];
-            pos += 4;
-            if (nalLen == 0 || pos + (int)nalLen > size) break;
-            const uint8_t* nal = data + pos;
-            uint8_t nalType = nal[0] & 0x1F;
-            if (nalType == 7) spsList.emplace_back(nal, nal + nalLen);
-            else if (nalType == 8) ppsList.emplace_back(nal, nal + nalLen);
-            pos += nalLen;
+        // Try to detect 4-byte or 2-byte length-prefixed NAL arrays.
+        bool parsed = false;
+        // Heuristic: try 4-byte lengths first
+        int tmp = 0;
+        bool valid4 = true;
+        while (tmp + 4 <= size) {
+            uint32_t nalLen = (uint32_t)data[tmp] << 24 | (uint32_t)data[tmp+1] << 16 | (uint32_t)data[tmp+2] << 8 | (uint32_t)data[tmp+3];
+            tmp += 4;
+            if (nalLen == 0 || tmp + (int)nalLen > size) { valid4 = false; break; }
+            tmp += (int)nalLen;
+        }
+        if (valid4 && tmp == size) {
+            int pos = 0;
+            while (pos + 4 <= size) {
+                uint32_t nalLen = (uint32_t)data[pos] << 24 | (uint32_t)data[pos+1] << 16 | (uint32_t)data[pos+2] << 8 | (uint32_t)data[pos+3];
+                pos += 4;
+                if (nalLen == 0 || pos + (int)nalLen > size) break;
+                const uint8_t* nal = data + pos;
+                uint8_t nalType = nal[0] & 0x1F;
+                if (nalType == 7) spsList.emplace_back(nal, nal + nalLen);
+                else if (nalType == 8) ppsList.emplace_back(nal, nal + nalLen);
+                pos += (int)nalLen;
+            }
+            parsed = true;
+        }
+
+        if (!parsed) {
+            // Try 2-byte lengths
+            tmp = 0;
+            bool valid2 = true;
+            while (tmp + 2 <= size) {
+                uint16_t nalLen = (uint16_t)data[tmp] << 8 | (uint16_t)data[tmp+1];
+                tmp += 2;
+                if (nalLen == 0 || tmp + (int)nalLen > size) { valid2 = false; break; }
+                tmp += (int)nalLen;
+            }
+            if (valid2 && tmp == size) {
+                int pos = 0;
+                while (pos + 2 <= size) {
+                    uint16_t nalLen = (uint16_t)data[pos] << 8 | (uint16_t)data[pos+1];
+                    pos += 2;
+                    if (nalLen == 0 || pos + (int)nalLen > size) break;
+                    const uint8_t* nal = data + pos;
+                    uint8_t nalType = nal[0] & 0x1F;
+                    if (nalType == 7) spsList.emplace_back(nal, nal + nalLen);
+                    else if (nalType == 8) ppsList.emplace_back(nal, nal + nalLen);
+                    pos += (int)nalLen;
+                }
+                parsed = true;
+            }
         }
     }
 }
@@ -139,8 +305,26 @@ static std::vector<uint8_t> BuildAvcC(const std::vector<std::vector<uint8_t>>& s
     std::vector<uint8_t> out;
     if (spsList.empty() || ppsList.empty()) return out;
 
-    const std::vector<uint8_t>& sps = spsList[0];
-    const std::vector<uint8_t>& pps = ppsList[0];
+    // Sanitize SPS/PPS: ensure no leading Annex-B start codes remain
+    std::vector<std::vector<uint8_t>> cleanSPS;
+    std::vector<std::vector<uint8_t>> cleanPPS;
+    auto sanitize = [](const std::vector<uint8_t>& v)->std::vector<uint8_t> {
+        if (v.empty()) return v;
+        size_t i = 0;
+        // skip any leading 00 00 01 or 00 00 00 01
+        while (i + 3 <= v.size()) {
+            if (v[i] == 0x00 && v[i+1] == 0x00 && v[i+2] == 0x01) { i += 3; break; }
+            if (i + 4 <= v.size() && v[i] == 0x00 && v[i+1] == 0x00 && v[i+2] == 0x00 && v[i+3] == 0x01) { i += 4; break; }
+            break;
+        }
+        return std::vector<uint8_t>(v.begin() + i, v.end());
+    };
+
+    for (const auto& s : spsList) cleanSPS.push_back(sanitize(s));
+    for (const auto& p : ppsList) cleanPPS.push_back(sanitize(p));
+
+    const std::vector<uint8_t>& sps = cleanSPS[0];
+    const std::vector<uint8_t>& pps = cleanPPS[0];
     if (sps.size() < 4) return out; // need profile/level bytes
 
     uint8_t profile = sps[1];
@@ -159,7 +343,7 @@ static std::vector<uint8_t> BuildAvcC(const std::vector<std::vector<uint8_t>>& s
     out.push_back(0xE0 | (uint8_t)(spsList.size() & 0x1F));
 
     // SPS entries
-    for (const auto& s : spsList) {
+    for (const auto& s : cleanSPS) {
         uint16_t len = (uint16_t)s.size();
         out.push_back((len >> 8) & 0xFF);
         out.push_back(len & 0xFF);
@@ -168,11 +352,96 @@ static std::vector<uint8_t> BuildAvcC(const std::vector<std::vector<uint8_t>>& s
 
     // numOfPictureParameterSets
     out.push_back((uint8_t)ppsList.size());
-    for (const auto& p : ppsList) {
+    for (const auto& p : cleanPPS) {
         uint16_t len = (uint16_t)p.size();
         out.push_back((len >> 8) & 0xFF);
         out.push_back(len & 0xFF);
         out.insert(out.end(), p.begin(), p.end());
+    }
+
+    // Additional data required for high profiles (100,110,122,244)
+    // Parse chroma/bit-depth from SPS RBSP if present and append profile-specific fields.
+    if (profile == 100 || profile == 110 || profile == 122 || profile == 244) {
+        // Extract RBSP (remove emulation_prevention_three_byte bytes 0x03)
+        const uint8_t* sps_ptr = sps.data();
+        size_t sps_size = sps.size();
+        if (sps_size > 1) {
+            // Create RBSP buffer
+            std::vector<uint8_t> rbsp;
+            rbsp.reserve(sps_size);
+            size_t i = 1; // skip NAL header byte
+            rbsp.push_back(sps_ptr[0]);
+            while (i + 2 < sps_size) {
+                if (sps_ptr[i] == 0 && sps_ptr[i+1] == 0 && sps_ptr[i+2] == 3) {
+                    rbsp.push_back(sps_ptr[i++]);
+                    rbsp.push_back(sps_ptr[i++]);
+                    // skip the 0x03
+                    i++;
+                } else {
+                    rbsp.push_back(sps_ptr[i++]);
+                }
+            }
+            while (i < sps_size) rbsp.push_back(sps_ptr[i++]);
+
+            // Simple bitstream reader for UE Golomb
+            struct BitReader {
+                const uint8_t* data;
+                size_t size;
+                size_t byte_pos;
+                int bit_pos;
+                void init(const uint8_t* d, size_t s) { data = d; size = s; byte_pos = 0; bit_pos = 7; }
+                uint32_t read_bits(int n) {
+                    uint32_t v = 0;
+                    for (int k = 0; k < n; ++k) {
+                        if (byte_pos >= size) return v;
+                        v <<= 1;
+                        v |= (uint32_t)((data[byte_pos] >> bit_pos) & 1);
+                        --bit_pos;
+                        if (bit_pos < 0) { bit_pos = 7; ++byte_pos; }
+                    }
+                    return v;
+                }
+            };
+
+            auto get_ue = [&](BitReader &br)->uint32_t {
+                int zeros = 0;
+                while (true) {
+                    uint32_t b = br.read_bits(1);
+                    if (b == 0) zeros++; else break;
+                    if (zeros > 31) break;
+                }
+                if (zeros == 0) return 0;
+                uint32_t val = br.read_bits(zeros);
+                return (1u << zeros) - 1 + val;
+            };
+
+            // Read relevant fields
+            BitReader br;
+            br.init(rbsp.data(), rbsp.size());
+            // skip profile/constraint/level (24 bits)
+            (void)br.read_bits(8);
+            (void)br.read_bits(8);
+            (void)br.read_bits(8);
+            // skip seq_parameter_set_id (UE)
+            (void)get_ue(br);
+
+            uint8_t chroma_format_idc = (uint8_t)get_ue(br);
+            if (chroma_format_idc == 3) {
+                // skip separate_colour_plane_flag
+                (void)br.read_bits(1);
+            }
+            uint8_t bit_depth_luma_minus8 = (uint8_t)get_ue(br);
+            uint8_t bit_depth_chroma_minus8 = (uint8_t)get_ue(br);
+
+            // reserved + chroma_format
+            out.push_back((uint8_t)(0xFC | (chroma_format_idc & 0x03)));
+            // reserved + bit_depth_luma_minus8
+            out.push_back((uint8_t)(0xF8 | (bit_depth_luma_minus8 & 0x07)));
+            // reserved + bit_depth_chroma_minus8
+            out.push_back((uint8_t)(0xF8 | (bit_depth_chroma_minus8 & 0x07)));
+            // numOfSequenceParameterSetExt
+            out.push_back(0x00);
+        }
     }
 
     return out;
@@ -224,6 +493,8 @@ bool StreamMuxer::Initialize(const std::string& rtmpUrl,
 {
     if (m_initialized || !videoEncoder) return false;
 
+    m_headerWritten = false;
+
     m_rtmpUrl = rtmpUrl;
 
     if (avformat_alloc_output_context2(&m_formatContext, nullptr, "flv",
@@ -239,21 +510,28 @@ bool StreamMuxer::Initialize(const std::string& rtmpUrl,
             return false;
     }
 
-    if (avformat_write_header(m_formatContext, nullptr) < 0)
-        return false;
+    // OBS-like behavior: delay avformat_write_header until we have valid H.264 avcC extradata.
+    // Some encoders (notably NVENC) may not populate AVCodecContext::extradata until the first
+    // keyframe is produced, and they often output Annex-B bytestream which must be packetized.
+    if (m_videoStream && m_videoStream->codecpar && m_videoStream->codecpar->extradata_size > 0) {
+        if (avformat_write_header(m_formatContext, nullptr) < 0)
+            return false;
+        m_headerWritten = true;
 
-    // Important: the muxer may adjust stream time_bases during header writing.
-    // Log the final values so we can correlate with packet timestamp behavior.
-    if (m_videoStream && m_audioStream) {
-        fprintf(stderr,
-                "[StreamMuxer] Post-header time_base: video={%d/%d} audio={%d/%d}\n",
-                m_videoStream->time_base.num, m_videoStream->time_base.den,
-                m_audioStream->time_base.num, m_audioStream->time_base.den);
+        if (m_videoStream && m_audioStream) {
+            fprintf(stderr,
+                    "[StreamMuxer] Post-header time_base: video={%d/%d} audio={%d/%d}\n",
+                    m_videoStream->time_base.num, m_videoStream->time_base.den,
+                    m_audioStream->time_base.num, m_audioStream->time_base.den);
+            fflush(stderr);
+        }
+    } else {
+        fprintf(stderr, "[StreamMuxer] Deferring avformat_write_header until H.264 avcC is available\n");
         fflush(stderr);
     }
 
-    // Provide time_base info to the StreamBuffer so it can compute ordering/latency in milliseconds
-    // while leaving each packet's timestamps in the stream's native time_base.
+    // Provide time_base info to the StreamBuffer.
+    // If the header is deferred, we still set initial time_bases (they may be adjusted later).
     if (m_buffer && m_videoStream && m_audioStream) {
         m_buffer->SetStreamInfo(
             m_videoStream->index, m_videoStream->time_base,
@@ -301,13 +579,58 @@ bool StreamMuxer::SetupVideoStream(VideoEncoder* encoder) {
 
     avcodec_parameters_from_context(m_videoStream->codecpar, ctx);
 
-    // Copy extradata (SPS/PPS) from encoder's codec context if available
+    // Copy extradata (SPS/PPS) from encoder's codec context if available.
+    // IMPORTANT: For H.264 in FLV/RTMP, codecpar->extradata must be an avcC
+    // (AVCDecoderConfigurationRecord) WITHOUT Annex-B start codes.
     AVCodecContext* encoderCtx = encoder->GetCodecContext();
     if (encoderCtx && encoderCtx->extradata && encoderCtx->extradata_size > 0) {
-        m_videoStream->codecpar->extradata = (uint8_t*)av_malloc(encoderCtx->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
-        if (m_videoStream->codecpar->extradata) {
-            memcpy(m_videoStream->codecpar->extradata, encoderCtx->extradata, encoderCtx->extradata_size);
-            m_videoStream->codecpar->extradata_size = encoderCtx->extradata_size;
+        const uint8_t* ed = encoderCtx->extradata;
+        int ed_size = encoderCtx->extradata_size;
+
+        // If extradata already looks like avcC (starts with 0x01), copy it directly.
+        if (ed_size >= 7 && ed[0] == 0x01) {
+            if (StartsWithAnnexBStartCode(ed, (size_t)ed_size) || AvcCHasAnnexBInNalUnits(ed, (size_t)ed_size)) {
+                fprintf(stderr, "[FATAL] Encoder extradata claims avcC but contains Annex-B start codes\n");
+                fflush(stderr);
+                abort();
+            }
+
+            if (m_videoStream->codecpar->extradata) {
+                av_freep(&m_videoStream->codecpar->extradata);
+                m_videoStream->codecpar->extradata_size = 0;
+            }
+            m_videoStream->codecpar->extradata = (uint8_t*)av_malloc(ed_size + AV_INPUT_BUFFER_PADDING_SIZE);
+            if (m_videoStream->codecpar->extradata) {
+                memcpy(m_videoStream->codecpar->extradata, ed, ed_size);
+                memset(m_videoStream->codecpar->extradata + ed_size, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+                m_videoStream->codecpar->extradata_size = ed_size;
+            }
+        } else {
+            // Build avcC from whatever format the encoder provided (Annex-B or AVCC).
+            std::vector<std::vector<uint8_t>> spsList;
+            std::vector<std::vector<uint8_t>> ppsList;
+            ExtractSpsPpsFromH264(ed, ed_size, spsList, ppsList);
+            if (!spsList.empty() && !ppsList.empty()) {
+                std::vector<uint8_t> avcC = BuildAvcC(spsList, ppsList);
+                if (!avcC.empty()) {
+                    if (StartsWithAnnexBStartCode(avcC.data(), avcC.size()) || AvcCHasAnnexBInNalUnits(avcC.data(), avcC.size())) {
+                        fprintf(stderr, "[FATAL] Built avcC extradata contains Annex-B start codes\n");
+                        fflush(stderr);
+                        abort();
+                    }
+
+                    if (m_videoStream->codecpar->extradata) {
+                        av_freep(&m_videoStream->codecpar->extradata);
+                        m_videoStream->codecpar->extradata_size = 0;
+                    }
+                    m_videoStream->codecpar->extradata = (uint8_t*)av_malloc(avcC.size() + AV_INPUT_BUFFER_PADDING_SIZE);
+                    if (m_videoStream->codecpar->extradata) {
+                        memcpy(m_videoStream->codecpar->extradata, avcC.data(), avcC.size());
+                        memset(m_videoStream->codecpar->extradata + avcC.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
+                        m_videoStream->codecpar->extradata_size = (int)avcC.size();
+                    }
+                }
+            }
         }
     }
 
@@ -350,45 +673,108 @@ bool StreamMuxer::SetupAudioStream(uint32_t rate, uint16_t ch, uint32_t br) {
         return false;
     }
 
-    // Keep audio timestamps in sample units (1/sample_rate). This avoids millisecond rounding jitter.
-    // FFmpeg will rescale as needed for the FLV/RTMP muxer.
-    m_audioStream->time_base = m_audioCodecContext->time_base;
+    // FLV/RTMP uses millisecond timestamps. The FLV muxer may overwrite time_base to {1/1000}.
+    // Set it upfront to avoid timestamp discontinuities when we defer header writing.
+    m_audioStream->time_base = {1, 1000};
     
     return true;
 }
 
 /* ============================== */
 
-bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex) {
-    if (!m_initialized || !m_isConnected || m_dropAllPackets) return false;
+bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex)
+{
+    if (!m_initialized || !m_isConnected || m_dropAllPackets)
+        return false;
 
     const auto* pktIn =
         static_cast<const VideoEncoder::EncodedPacket*>(p);
-    if (pktIn->data.empty()) return false;
+    if (pktIn->data.empty())
+        return false;
+
+    // Accept Annex-B from encoders (NVENC commonly emits Annex-B). Convert to AVCC for FLV/RTMP.
+    const bool inputIsAnnexB = StartsWithAnnexBStartCode(pktIn->data.data(), pktIn->data.size());
+    std::vector<uint8_t> convertedAvcc;
+    const uint8_t* payload = pktIn->data.data();
+    size_t payloadSize = pktIn->data.size();
+    if (inputIsAnnexB) {
+        convertedAvcc = AnnexBToAvcc(payload, payloadSize);
+        if (convertedAvcc.empty()) {
+            fprintf(stderr, "[StreamMuxer] AnnexBToAvcc failed (size=%zu)\n", payloadSize);
+            fflush(stderr);
+            return false;
+        }
+        payload = convertedAvcc.data();
+        payloadSize = convertedAvcc.size();
+    }
+
+    // If we haven't written the FLV header yet, ensure we have valid avcC extradata.
+    // Prefer extracting SPS/PPS from the first keyframe packet.
+    if (!m_headerWritten) {
+        const bool haveAvcC = (m_videoStream && m_videoStream->codecpar && m_videoStream->codecpar->extradata_size > 0);
+        if (!haveAvcC && pktIn->isKeyframe) {
+            std::vector<std::vector<uint8_t>> spsList;
+            std::vector<std::vector<uint8_t>> ppsList;
+            ExtractSpsPpsFromH264(pktIn->data.data(), (int)pktIn->data.size(), spsList, ppsList);
+            if (!spsList.empty() && !ppsList.empty()) {
+                std::vector<uint8_t> avcC = BuildAvcC(spsList, ppsList);
+                if (!avcC.empty()) {
+                    if (StartsWithAnnexBStartCode(avcC.data(), avcC.size()) || AvcCHasAnnexBInNalUnits(avcC.data(), avcC.size())) {
+                        fprintf(stderr, "[StreamMuxer] Built avcC extradata invalid (contains Annex-B)\n");
+                        fflush(stderr);
+                        return false;
+                    }
+                    (void)SetCodecparExtradata(m_videoStream->codecpar, avcC.data(), avcC.size());
+                }
+            }
+        }
+
+        const bool ready = (m_videoStream && m_videoStream->codecpar && m_videoStream->codecpar->extradata_size > 0);
+        if (ready) {
+            if (avformat_write_header(m_formatContext, nullptr) < 0) {
+                fprintf(stderr, "[StreamMuxer] avformat_write_header failed (deferred)\n");
+                fflush(stderr);
+                m_isConnected = false;
+                return false;
+            }
+            m_headerWritten = true;
+
+            if (m_videoStream && m_audioStream) {
+                fprintf(stderr,
+                        "[StreamMuxer] Post-header time_base: video={%d/%d} audio={%d/%d}\n",
+                        m_videoStream->time_base.num, m_videoStream->time_base.den,
+                        m_audioStream->time_base.num, m_audioStream->time_base.den);
+                fflush(stderr);
+            }
+
+            if (m_buffer && m_videoStream && m_audioStream) {
+                m_buffer->SetStreamInfo(
+                    m_videoStream->index, m_videoStream->time_base,
+                    m_audioStream->index, m_audioStream->time_base);
+            }
+        }
+    }
 
     AVPacket* pkt = av_packet_alloc();
-    av_new_packet(pkt, pktIn->data.size());
-    memcpy(pkt->data, pktIn->data.data(), pktIn->data.size());
+    av_new_packet(pkt, (int)payloadSize);
+    memcpy(pkt->data, payload, payloadSize);
 
-    // GUARD: Don't send non-keyframe video before first keyframe
+    // Do not send frames before first IDR
     if (!m_sentFirstVideoKeyframe && !pktIn->isKeyframe) {
         av_packet_free(&pkt);
         return false;
     }
 
-    // Video clock: frameIndex in {1/fps}. Convert directly into the muxer's chosen
-    // stream time_base using rounded rescaling to avoid systematic drift.
     const uint32_t fps = m_videoEncoder ? m_videoEncoder->GetFPS() : 30;
-    const AVRational vSrcTb{1, (int)fps};
-    const AVRational vDstTb = m_videoStream->time_base;
+    const AVRational srcTb{1, (int)fps};
+    const AVRational dstTb = m_videoStream->time_base;
 
-    const int64_t pts = RescaleRounded(frameIndex, vSrcTb, vDstTb);
-    int64_t nextPts = RescaleRounded(frameIndex + 1, vSrcTb, vDstTb);
-    if (nextPts <= pts) nextPts = pts + 1;
+    const int64_t pts = RescaleRounded(frameIndex, srcTb, dstTb);
+    const int64_t nextPts = RescaleRounded(frameIndex + 1, srcTb, dstTb);
 
     pkt->pts = pts;
-    pkt->dts = pts;  // NOTE: only correct if encoder outputs no B-frames
-    pkt->duration = nextPts - pts;
+    pkt->dts = pts;
+    pkt->duration = std::max<int64_t>(1, nextPts - pts);
     pkt->stream_index = m_videoStream->index;
 
     if (pktIn->isKeyframe) {
@@ -396,32 +782,6 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex) {
         m_sentFirstVideoKeyframe = true;
     }
 
-    // If this is the first keyframe and we haven't sent the AVC sequence header,
-    // try to extract SPS/PPS from the packet (if encoder didn't provide extradata)
-    if (pktIn->isKeyframe && !m_sentAVCSequenceHeader) {
-        if (!m_videoStream->codecpar->extradata || m_videoStream->codecpar->extradata_size == 0) {
-            std::vector<std::vector<uint8_t>> spsList;
-            std::vector<std::vector<uint8_t>> ppsList;
-            ExtractSpsPpsFromH264(pktIn->data.data(), (int)pktIn->data.size(), spsList, ppsList);
-            if (!spsList.empty() && !ppsList.empty()) {
-                std::vector<uint8_t> avcC = BuildAvcC(spsList, ppsList);
-                if (!avcC.empty()) {
-                    // Set codecpar extradata so the FLV muxer can emit avcC
-                    m_videoStream->codecpar->extradata = (uint8_t*)av_malloc(avcC.size() + AV_INPUT_BUFFER_PADDING_SIZE);
-                    if (m_videoStream->codecpar->extradata) {
-                        memcpy(m_videoStream->codecpar->extradata, avcC.data(), avcC.size());
-                        memset(m_videoStream->codecpar->extradata + avcC.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
-                        m_videoStream->codecpar->extradata_size = (int)avcC.size();
-                    }
-                }
-            }
-        }
-
-        // Send (or buffer) the AVC sequence header before the first video packet
-        SendAVCSequenceHeader();
-    }
-
-    // MONOTONIC DTS CHECK
     if (pkt->dts <= m_lastWrittenVideoDTS) {
         av_packet_free(&pkt);
         return false;
@@ -439,7 +799,7 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex) {
         if (ret < 0) {
             char errbuf[256];
             av_strerror(ret, errbuf, sizeof(errbuf));
-            fprintf(stderr, "[StreamMuxer] WriteVideoPacket av_interleaved_write_frame failed: %s\n", errbuf);
+            fprintf(stderr, "[StreamMuxer] WriteVideoPacket failed: %s\n", errbuf);
             fflush(stderr);
             m_isConnected = false;
             return false;
@@ -447,9 +807,10 @@ bool StreamMuxer::WriteVideoPacket(const void* p, int64_t frameIndex) {
     }
 
     m_videoPacketCount++;
-    m_totalBytes += pktIn->data.size();
+    m_totalBytes += payloadSize;
     return true;
 }
+
 
 bool StreamMuxer::WriteAudioPacket(const EncodedAudioPacket& p) {
     if (!m_initialized || !m_isConnected)
@@ -460,7 +821,9 @@ bool StreamMuxer::WriteAudioPacket(const EncodedAudioPacket& p) {
     // This prevents audio drop when video is still initializing
 
     AVPacket* pkt = av_packet_alloc();
-    av_new_packet(pkt, p.data.size());
+    if (!pkt) return false;
+
+    av_new_packet(pkt, (int)p.data.size());
     memcpy(pkt->data, p.data.data(), p.data.size());
 
     // Audio clock: cumulative samples in {1/sample_rate}. Convert into the muxer's chosen
@@ -482,19 +845,14 @@ bool StreamMuxer::WriteAudioPacket(const EncodedAudioPacket& p) {
     pkt->duration = nextPts - pts;
     pkt->stream_index = m_audioStream->index;
 
-    // Advance sample counter
-    m_audioSamplesWritten = nextSamples;
-
     // MONOTONIC DTS CHECK
     if (pkt->dts <= m_lastWrittenAudioDTS) {
-        fprintf(stderr,
-            "❌ MONOTONIC DTS VIOLATION: current_dts=%lld <= last_dts=%lld (packet dropped)\n",
-            pkt->dts, m_lastWrittenAudioDTS);
-        fflush(stderr);
         av_packet_free(&pkt);
         return false;
     }
     m_lastWrittenAudioDTS = pkt->dts;
+
+    m_audioSamplesWritten = nextSamples;
 
     if (m_buffer) {
         if (!m_buffer->AddPacket(pkt)) {
@@ -518,8 +876,6 @@ bool StreamMuxer::WriteAudioPacket(const EncodedAudioPacket& p) {
     m_totalBytes += p.data.size();
     return true;
 }
-
-/* ============================== */
 
 void StreamMuxer::SendAACSequenceHeader() {
     if (!m_audioStream || !m_audioCodecContext || m_sentAACSequenceHeader)
@@ -567,51 +923,13 @@ void StreamMuxer::SendAACSequenceHeader() {
     m_sentAACSequenceHeader = true;
 }
 
-void StreamMuxer::SendAVCSequenceHeader() {
-    if (!m_videoStream || m_sentAVCSequenceHeader)
-        return;
-
-    // Get SPS/PPS from stream codecpar (we copied them in SetupVideoStream)
-    if (!m_videoStream->codecpar->extradata || m_videoStream->codecpar->extradata_size == 0)
-        return;
-
-    // FLV AVC sequence header:
-    // [AVC packet type = 0] [composition time offset] [AVCDecoderConfigurationRecord]
-    
-    int extradata_size = m_videoStream->codecpar->extradata_size;
-    AVPacket* pkt = av_packet_alloc();
-    av_new_packet(pkt, 4 + extradata_size); // 1 byte type + 3 bytes CTO + extradata
-    
-    pkt->data[0] = 0; // AVC packet type = 0 (sequence header)
-    pkt->data[1] = 0; // Composition time offset (3 bytes) = 0
-    pkt->data[2] = 0;
-    pkt->data[3] = 0;
-    
-    memcpy(pkt->data + 4, m_videoStream->codecpar->extradata, extradata_size);
-
-    pkt->pts = 0;
-    pkt->dts = 0;
-    pkt->duration = 0;
-    pkt->stream_index = m_videoStream->index;
-
-    if (m_buffer) {
-        // Add sequence header packet to the buffer so it preserves ordering
-        if (!m_buffer->AddPacket(pkt)) {
-            av_packet_free(&pkt);
-            return;
-        }
-    } else {
-        av_write_frame(m_formatContext, pkt);
-        av_packet_free(&pkt);
-    }
-
-    m_sentAVCSequenceHeader = true;
-}
-
 /* ============================== */
 
 bool StreamMuxer::SendNextBufferedPacket() {
     if (!m_buffer || !m_isConnected) return false;
+
+    // Don't send anything until the muxer header is written.
+    if (!m_headerWritten) return false;
 
     AVPacket* pkt = m_buffer->GetNextPacket();
     if (!pkt) return false;
@@ -673,6 +991,7 @@ void StreamMuxer::Cleanup() {
     }
     avcodec_free_context(&m_audioCodecContext);
     m_initialized = false;
+    m_headerWritten = false;
 }
 
 bool StreamMuxer::IsBackpressure() const {
