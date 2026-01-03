@@ -139,9 +139,17 @@ server {
         add_header Access-Control-Allow-Origin *;
     }
 
-    # Optional: serve recordings directly
-    location /vod {
-        root /srv;
+    # Serve SRS recordings (VOD)
+    # Filesystem root: /srv/srs/recordings (contains subfolders like /live)
+    location = /vod {
+        return 301 /vod/;
+    }
+
+    location /vod/ {
+        alias /srv/srs/recordings/;
+        autoindex on;
+        autoindex_exact_size off;
+        autoindex_localtime on;
         add_header Access-Control-Allow-Origin *;
     }
 }
