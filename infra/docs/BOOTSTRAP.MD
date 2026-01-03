@@ -285,3 +285,7 @@ vhost __defaultVhost__ {
 
 
 sudo chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
+
+
+sudo mkdir -p /srv/ionia-player
+sudo chown -R www-data:www-data /srv/ionia-player (or whatever user nginx runs as)
