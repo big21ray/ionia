@@ -211,3 +211,91 @@ chmod -R 755 /srv/srs
 
 cd /opt/srs/trunk
 ./objs/srs -c conf/ionia.conf
+
+
+nano /etc/systemd/system/srs.service
+[Unit]
+Description=SRS Media Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/srs/trunk
+ExecStart=/opt/srs/trunk/objs/srs -c /opt/srs/trunk/conf/ionia.conf
+
+# THIS IS THE IMPORTANT PART
+LimitNOFILE=10000
+
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+
+systemctl daemon-reload
+systemctl start srs
+
+# =====================================================
+# Global
+# =====================================================
+listen              19350;
+max_connections     1000;
+daemon              off;
+
+srs_log_tank        file;
+srs_log_file        ./objs/srs.log;
+srs_log_level       info;
+
+# =====================================================
+# HTTP Server (serves HLS files)
+# URL root: http://host:8080/
+# Filesystem root: /srv/srs/hls
+# =====================================================
+http_server {
+    enabled on;
+    listen 8080;
+    dir /srv/srs/hls;
+}
+
+# =====================================================
+# Default VHost
+# =====================================================
+vhost __defaultVhost__ {
+
+    tcp_nodelay on;
+    min_latency on;
+
+    publish {
+        mr off;
+    }
+
+    # -------------------------
+    # HLS
+    # -------------------------
+    hls {
+        enabled         on;
+
+        hls_path        /srv/srs/hls;
+        hls_fragment    2;
+        hls_window      120;
+        hls_cleanup     on;
+        hls_dispose     120;
+
+        # Final paths:
+        # /srv/srs/hls/live/test3.m3u8
+        # /srv/srs/hls/live/test3-xxx.ts
+        hls_m3u8_file   [app]/[stream].m3u8;
+        hls_ts_file     [app]/[stream]-[seq].ts;
+    }
+
+    # -------------------------
+    # DVR
+    # -------------------------
+    dvr {
+        enabled             on;
+        dvr_path            /srv/srs/recordings;
+        dvr_plan            session;
+        dvr_wait_keyframe   on;
+    }
+}
