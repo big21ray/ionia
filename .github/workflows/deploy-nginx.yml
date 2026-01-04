@@ -3,6 +3,10 @@ on:
   push:
     branches:
       - phase-2-server-setup
+    paths:
+      - infra/nginx/**
+      - infra/scripts/deploy_nginx.sh
+      - .github/workflows/deploy-nginx.yml
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -21,4 +25,4 @@ jobs:
       - name: Deploy nginx
         run: |
           ssh root@46.224.189.114 \
-            "bash /opt/ionia/infra/scripts/deploy_nginx.sh phase-2-server-setup"
+            "/opt/ionia/infra/scripts/deploy_nginx.sh phase-2-server-setup"

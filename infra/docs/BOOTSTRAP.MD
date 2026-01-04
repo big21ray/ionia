@@ -159,9 +159,48 @@ Deploy script lives in the repo:
 
 - /opt/ionia/infra/scripts/deploy_nginx.sh
 
+Web player deploy script:
+
+- /opt/ionia/infra/scripts/deploy_player.sh
+
+--------------------------------------------------------------------------------------
+
+CI deploy (recommended for web player)
+
+This avoids uploading dist/ manually and avoids building on the server.
+
+1) One-time server setup (example)
+
+Create a dedicated deploy user and a target folder:
+
+- sudo adduser --disabled-password deploy
+- sudo mkdir -p /srv/ionia-player
+- sudo chown -R deploy:www-data /srv/ionia-player
+- sudo find /srv/ionia-player -type d -exec chmod 755 {} \;
+- sudo find /srv/ionia-player -type f -exec chmod 644 {} \;
+
+Add the CI public key to:
+
+- /home/deploy/.ssh/authorized_keys
+
+2) GitHub Secrets (Repo → Settings → Secrets and variables → Actions)
+
+- DEPLOY_HOST: server IP/host
+- DEPLOY_USER: deploy
+- DEPLOY_PLAYER_PATH: /srv/ionia-player
+- DEPLOY_SSH_KEY: private key for the deploy user
+
+3) Workflow
+
+- .github/workflows/deploy-player.yml deploys on push to phase-2-server-setup
+
 Manual run example:
 
 - bash /opt/ionia/infra/scripts/deploy_nginx.sh phase-2-server-setup
+
+Manual web player deploy example:
+
+- bash /opt/ionia/infra/scripts/deploy_player.sh phase-2-server-setup
 
 chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
 
@@ -289,3 +328,48 @@ sudo chmod +x /opt/ionia/infra/scripts/deploy_nginx.sh
 
 sudo mkdir -p /srv/ionia-player
 sudo chown -R www-data:www-data /srv/ionia-player (or whatever user nginx runs as)
+
+2) Ensure nginx is using the updated site config
+Your nginx site config should include:
+
+/vod/ with autoindex on
+/vod-raw/ (raw access for flv.js)
+redirect /vod/*.flv → /player/?src=/vod-raw/...
+/player/ serving /srv/ionia-player/
+That’s already in your repo file: streaming.conf
+
+On the server, make sure streaming.conf points to the repo copy, or just edit it directly. Then:
+
+sudo nginx -t
+sudo systemctl reload nginx
+3) Confirm it works
+
+Browse shows folders: http://SERVER_IP/vod/ (you should see live/)
+Clicking a .flv should open: http://SERVER_IP/player/?src=/vod-raw/...flv
+Direct web player test: http://SERVER_IP/player/
+Direct raw FLV test (should download or display bytes): http://SERVER_IP/vod-raw/live/<file>.flv
+One important note
+
+The server does not need npm at all with this approach. Only nginx + the static files in /srv/ionia-player.
+
+Option C: SFTP (built-in, interactive)
+
+sftp root@YOUR_SERVER_IP
+Then:
+mkdir /srv/ionia-player
+cd /srv/ionia-player
+put -r "C:/Users/Karmine Corp/Documents/Ionia/dist/*"
+bye
+After upload, test
+
+# ======================== Deploy the dist folder
+
+ssh ionia "sudo rm -rf /srv/ionia-player/*"
+
+scp -r dist/* ionia:/srv/ionia-player/
+
+sudo chown -R www-data:www-data /srv/ionia-player
+sudo find /srv/ionia-player -type d -exec chmod 755 {} \;
+sudo find /srv/ionia-player -type f -exec chmod 644 {} \;
+
+
