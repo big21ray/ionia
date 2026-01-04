@@ -2,10 +2,12 @@ import { useRef, useState, useEffect } from 'react';
 
 interface VideoPlayerProps {
   videoPath: string;
+  mode?: 'web' | 'electron';
 }
 
-const VideoPlayer = ({ videoPath }: VideoPlayerProps) => {
+const VideoPlayer = ({ videoPath, mode = 'electron' }: VideoPlayerProps) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const flvPlayerRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(1);
@@ -20,6 +22,93 @@ const VideoPlayer = ({ videoPath }: VideoPlayerProps) => {
   const speedMenuRef = useRef<HTMLDivElement>(null);
   const inactivityTimerRef = useRef<NodeJS.Timeout | null>(null);
   const speedIndicatorTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const video = videoRef.current;
+    if (!video) return;
+
+    const cleanupFlv = () => {
+      const flvPlayer = flvPlayerRef.current;
+      if (!flvPlayer) return;
+      try {
+        flvPlayer.pause();
+      } catch {
+        // ignore
+      }
+      try {
+        flvPlayer.unload();
+      } catch {
+        // ignore
+      }
+      try {
+        flvPlayer.detachMediaElement();
+      } catch {
+        // ignore
+      }
+      try {
+        flvPlayer.destroy();
+      } catch {
+        // ignore
+      }
+      flvPlayerRef.current = null;
+    };
+
+    const setNativeSrc = () => {
+      cleanupFlv();
+      video.src = videoPath;
+      video.load();
+    };
+
+    const attachFlvIfPossible = async () => {
+      cleanupFlv();
+
+      // Only the hosted web player uses flv.js.
+      if (mode !== 'web') {
+        setNativeSrc();
+        return;
+      }
+
+      const isFlv = /\.flv(\?|#|$)/i.test(videoPath);
+      if (!isFlv) {
+        setNativeSrc();
+        return;
+      }
+
+      const flvjsModule = await import('flv.js');
+      const flvjs = flvjsModule.default;
+      if (cancelled) return;
+
+      if (!flvjs?.isSupported?.()) {
+        setNativeSrc();
+        return;
+      }
+
+      video.removeAttribute('src');
+      video.load();
+
+      const player = flvjs.createPlayer(
+        {
+          type: 'flv',
+          url: videoPath,
+        },
+        {
+          enableStashBuffer: false,
+        },
+      );
+
+      player.attachMediaElement(video);
+      player.load();
+      flvPlayerRef.current = player;
+    };
+
+    void attachFlvIfPossible();
+
+    return () => {
+      cancelled = true;
+      cleanupFlv();
+    };
+  }, [videoPath, mode]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -423,7 +512,6 @@ const VideoPlayer = ({ videoPath }: VideoPlayerProps) => {
       {/* Video */}
       <video
         ref={videoRef}
-        src={videoPath}
         className="w-full h-full object-contain"
         onPlay={() => setIsPlaying(true)}
         onPause={() => setIsPlaying(false)}

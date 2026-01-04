@@ -1,0 +1,28 @@
+name: Deploy nginx infra
+on:
+  push:
+    branches:
+      - phase-2-server-setup
+    paths:
+      - infra/nginx/**
+      - infra/scripts/deploy_nginx.sh
+      - .github/workflows/deploy-nginx.yml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H 46.224.189.114 >> ~/.ssh/known_hosts
+
+      - name: Deploy nginx
+        run: |
+          ssh root@46.224.189.114 \
+            "/opt/ionia/infra/scripts/deploy_nginx.sh phase-2-server-setup"
