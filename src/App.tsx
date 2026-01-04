@@ -41,14 +41,16 @@ function App() {
 
   const isElectron = typeof window !== 'undefined' && !!(window as any).electronAPI;
 
-  if (webSrc && !isElectron) {
+  // Hosted player mode: /player/?src=...
+  // Never show local (Electron) controls in this mode.
+  if (webSrc) {
     return <WebVideoPlayer src={webSrc} />;
   }
 
   return (
     <div className="w-screen h-screen bg-black overflow-hidden relative">
       {/* Local (Electron) controls only */}
-      {isElectron && (
+      {isElectron && !webSrc && (
         <div className="absolute top-4 left-4 z-50 flex items-center space-x-2">
           <RecordingButton />
           <StreamButton />
