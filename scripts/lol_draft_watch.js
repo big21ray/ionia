@@ -76,20 +76,66 @@ const loadChampionIdToName = async ({ lockfilePath }) => {
   });
 
   const map = Object.create(null);
-  if (Array.isArray(data)) {
-    for (const champ of data) {
+
+  // LCU `champions.json` shape differs across builds. Handle common variants:
+  // - Array of champions
+  // - { champions: [...] }
+  // - { data: [...] }
+  // - Object map keyed by id/alias
+  let champs = null;
+  if (Array.isArray(data)) champs = data;
+  else if (data && typeof data === 'object') {
+    if (Array.isArray(data.champions)) champs = data.champions;
+    else if (Array.isArray(data.data)) champs = data.data;
+    else champs = Object.values(data);
+  }
+
+  if (Array.isArray(champs)) {
+    for (const champ of champs) {
       const id = Number(champ?.id);
       if (!Number.isFinite(id) || id <= 0) continue;
 
       // Prefer the human-readable name (e.g., "Lee Sin").
       const alias = typeof champ?.alias === 'string' ? champ.alias.trim() : '';
       const name = typeof champ?.name === 'string' ? champ.name.trim() : '';
-      map[id] = name || alias || String(id);
+      const label = name || alias;
+      if (label) map[id] = label;
     }
   }
 
   cachedChampionIdToName = map;
   return map;
+};
+
+// Fallback: resolve a single champion id to a readable name.
+// This is used when the bulk mapping endpoint doesn't return the expected shape.
+const championNameCache = new Map();
+const getChampionNameById = async ({ lockfilePath, championId }) => {
+  const id = Number(championId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+
+  if (championNameCache.has(id)) return championNameCache.get(id);
+
+  const auth = getLcuAuthFromLockfilePath(lockfilePath);
+  const url = `${auth.protocol}://127.0.0.1:${auth.port}/lol-game-data/assets/v1/champions/${id}.json`;
+  try {
+    const champ = await requestJson({
+      url,
+      headers: { Authorization: basicAuthHeader('riot', auth.password) },
+      timeoutMs: 1500,
+      verifyTls: false,
+    });
+
+    const alias = typeof champ?.alias === 'string' ? champ.alias.trim() : '';
+    const name = typeof champ?.name === 'string' ? champ.name.trim() : '';
+    const label = name || alias || null;
+
+    championNameCache.set(id, label);
+    return label;
+  } catch {
+    championNameCache.set(id, null);
+    return null;
+  }
 };
 
 const getGameflowPhase = async ({ lockfilePath }) => {
@@ -192,7 +238,15 @@ const main = async () => {
     // We always render the full DRAFT_SEQUENCE (completed and future slots).
     const rendered = [];
     for (const k of DRAFT_SEQUENCE) {
-      const v = slots[k];
+      let v = slots[k];
+
+      // If parsing couldn't resolve a name, it falls back to the numeric id as a string.
+      // Convert that to a champion name via per-id lookup.
+      if (typeof v === 'string' && /^\d+$/.test(v)) {
+        const resolved = await getChampionNameById({ lockfilePath, championId: Number(v) });
+        if (resolved) v = resolved;
+      }
+
       rendered.push(`${k}=${v || '-'}`);
     }
 
