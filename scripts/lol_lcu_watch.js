@@ -1,276 +1,655 @@
-import fs from 'node:fs';
-import path from 'node:path';
-import https from 'node:https';
-import { execFile } from 'node:child_process';
+/*
+ * JS port of selected functions from `src/lol_draft_parser.py`.
+ *
+ * This file is authored as an ES module (ESM).
+ * Use it with:
+ *   node -e "import('./src/lol_draft_parser.js').then(m=>console.log(Object.keys(m)))"
+ */
 
-// Small helper to wait between polls.
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import * as http from 'node:http';
+import * as https from 'node:https';
+import { URL } from 'node:url';
 
-// Runs a PowerShell command and returns stdout/stderr.
-// We use PowerShell here because it's the easiest way on Windows to query the
-// command line of a running process (LeagueClientUx.exe).
-const execPowerShell = async (command, timeoutMs = 2000) => {
-  return await new Promise((resolve, reject) => {
-    execFile(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command],
-      { windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024 },
-      (err, stdout, stderr) => {
-        if (err) {
-          reject(Object.assign(err, { stdout: String(stdout || ''), stderr: String(stderr || '') }));
-          return;
-        }
-        resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
-      },
-    );
-  });
-};
 
-const getLeagueClientProcesses = async () => {
-  // Returns one entry per LeagueClientUx.exe process.
-  // We pull *both* CommandLine and ExecutablePath so we can filter Tournament Realm
-  // the same way your Python code intends:
-  // - Python LCU._get_cmd_args(): checks "loltmnt" in the CommandLine
-  // - Python OBS window filter: checks "loltmnt" in the exe path
-  // Here we support either.
-  const ps =
-    "(Get-CimInstance Win32_Process -Filter \"Name='LeagueClientUx.exe'\" | Select-Object CommandLine, ExecutablePath | ConvertTo-Json -Compress)";
-  const { stdout } = await execPowerShell(ps);
+function lcuError(message) {
+  const err = new Error(message);
+  err.name = 'LcuError';
+  return err;
+}
 
-  const trimmed = stdout.trim();
-  if (!trimmed) return [];
+function liveClientError(message) {
+  const err = new Error(message);
+  err.name = 'LiveClientError';
+  return err;
+}
 
-  let parsed;
+/**
+ * @param {string} contents
+ * @returns {{ pid:number, port:number, password:string, protocol:'http'|'https' }}
+ */
+function parseLockfile(contents) {
+  const parts = String(contents || '').trim().split(':');
+  if (parts.length !== 5) throw lcuError('Invalid lockfile format.');
+
+  const pid = Number(parts[1]);
+  const port = Number(parts[2]);
+  const password = parts[3];
+  const protocol = String(parts[4] || '').trim().toLowerCase();
+
+  if (!Number.isFinite(pid) || !Number.isFinite(port)) throw lcuError('Invalid lockfile pid/port.');
+  if (protocol !== 'http' && protocol !== 'https') throw lcuError(`Unexpected lockfile protocol: ${protocol}`);
+
+  return { pid, port, password, protocol };
+}
+
+function readLockfile(lockfilePath) {
+  if (!lockfilePath) throw lcuError('lockfilePath is required.');
+
+  let p = lockfilePath;
+  // Allow passing install directory.
+  if (fs.existsSync(p) && fs.statSync(p).isDirectory()) {
+    p = path.join(p, 'lockfile');
+  }
+
+  if (!fs.existsSync(p) || !fs.statSync(p).isFile()) throw lcuError(`Lockfile not found at: ${p}`);
+  return fs.readFileSync(p, 'utf8');
+}
+
+function isWindows() {
+  return process.platform === 'win32';
+}
+
+function powershellGetLeagueClientUxCmdlines() {
+  if (!isWindows()) return [];
+
+  const ps = "Get-CimInstance Win32_Process -Filter \"Name='LeagueClientUx.exe'\" | Select-Object -ExpandProperty CommandLine | ConvertTo-Json -Compress";
   try {
-    parsed = JSON.parse(trimmed);
+    const proc = spawnSync('powershell', ['-NoProfile', '-Command', ps], {
+      encoding: 'utf8',
+      timeout: 2000,
+      windowsHide: true,
+    });
+
+    if (proc.status !== 0) return [];
+    const raw = String(proc.stdout || '').trim();
+    if (!raw) return [];
+
+    try {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === 'string') return [parsed];
+      if (Array.isArray(parsed)) return parsed.filter((x) => typeof x === 'string');
+      return [];
+    } catch {
+      // Sometimes PowerShell output isn't clean JSON; fall back to line splitting.
+      return raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    }
   } catch {
     return [];
   }
+}
 
-  const arr = Array.isArray(parsed) ? parsed : [parsed];
-  return arr
-    .map((p) => ({
-      cmdLine: String(p?.CommandLine || '').trim(),
-      exePath: String(p?.ExecutablePath || '').trim(),
-    }))
-    .filter((p) => p.cmdLine || p.exePath);
-};
+function extractInstallDirAndPort(cmdline) {
+  if (typeof cmdline !== 'string' || !cmdline) return { installDir: null, port: null };
 
-const parseInstallDirAndPort = (cmdLine) => {
-  // Extract two values from the League client command line:
-  // - installDirectory: where to find the lockfile
-  // - port: used by the local LCU API
-  const installMatch = /--install-directory=([^\s\"]+|\"[^\"]+\")/i.exec(cmdLine);
-  const portMatch = /--app-port=(\d+)/i.exec(cmdLine);
-  if (!installMatch || !portMatch) return null;
+  let installDir = null;
+  let port = null;
 
-  const rawInstall = installMatch[1];
-  const installDirectory = rawInstall.startsWith('"') && rawInstall.endsWith('"')
-    ? rawInstall.slice(1, -1)
-    : rawInstall;
+  // --install-directory="C:\Riot Games\..." or --install-directory=C:\Riot Games\...
+  {
+    const m = cmdline.match(/--install-directory(?:=|\s+)(?:\"([^\"]+)\"|([^\s]+))/i);
+    if (m) installDir = String(m[1] || m[2] || '').trim().replace(/^"|"$/g, '');
+  }
 
-  const port = Number(portMatch[1]);
-  if (!installDirectory || !Number.isFinite(port) || port <= 0) return null;
-  return { installDirectory, port };
-};
-
-const readLockfile = (installDirectory) => {
-  // The lockfile format is:
-  //   processName:pid:port:password:protocol
-  // Example:
-  //   LeagueClientUx:12345:62245:somePassword:https
-  // We need the port and password to authenticate to the LCU HTTPS API.
-  const lockfilePath = path.join(installDirectory, 'lockfile');
-  if (!fs.existsSync(lockfilePath)) return null;
-
-  const content = fs.readFileSync(lockfilePath, 'utf8').trim();
-  const parts = content.split(':');
-  // process:pid:port:password:protocol
-  if (parts.length < 5) return null;
-
-  const port = Number(parts[2]);
-  const password = parts[3];
-  if (!Number.isFinite(port) || port <= 0 || !password) return null;
-  return { port, password };
-};
-
-const lcuGet = async ({ port, password }, endpoint, timeoutMs = 1000) => {
-  // LCU API uses HTTPS on localhost with a self-signed cert.
-  // Auth is HTTP Basic with username "riot" and password from the lockfile.
-  // Node's https can talk to it if we set rejectUnauthorized=false.
-  const auth = Buffer.from(`riot:${password}`, 'utf8').toString('base64');
-  const url = `https://127.0.0.1:${port}${endpoint}`;
-
-  return await new Promise((resolve, reject) => {
-    const req = https.request(
-      url,
-      {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-          Authorization: `Basic ${auth}`,
-        },
-        rejectUnauthorized: false,
-        timeout: timeoutMs,
-      },
-      (res) => {
-        let body = '';
-        res.setEncoding('utf8');
-        res.on('data', (chunk) => (body += chunk));
-        res.on('end', () => {
-          if ((res.statusCode || 0) >= 400) {
-            reject(new Error(`HTTP ${res.statusCode} for ${endpoint}`));
-            return;
-          }
-          try {
-            // Most LCU endpoints return JSON.
-            resolve(body ? JSON.parse(body) : null);
-          } catch {
-            // If it's not JSON, return the raw body.
-            resolve(body);
-          }
-        });
-      },
-    );
-
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('timeout'));
-    });
-    req.on('error', reject);
-    req.end();
-  });
-};
-
-const getLcuConnection = async () => {
-  // Step 1: Find the League client process.
-  // Step 2: Parse install directory from its command line.
-  // Step 3: Read lockfile to get the current password (and sometimes updated port).
-  //
-  // This mirrors the Python approach: loop until a usable lockfile is available.
-  // In practice, the lockfile may briefly not exist (client starting) or be in flux.
-  const procs = await getLeagueClientProcesses();
-  if (procs.length === 0) return null;
-
-  // Tournament Realm preference: pick a process where "loltmnt" appears either
-  // in the full executable path or in the command line.
-  const tr = procs.filter((p) => `${p.exePath} ${p.cmdLine}`.toLowerCase().includes('loltmnt'));
-  const candidates = tr.length > 0 ? tr : procs;
-
-  // Prefer a process whose command line includes both flags, but still fall back.
-  const orderedCandidates = [...candidates].sort((a, b) => {
-    const aHas = a.cmdLine.includes('--install-directory=') && a.cmdLine.includes('--app-port=');
-    const bHas = b.cmdLine.includes('--install-directory=') && b.cmdLine.includes('--app-port=');
-    return Number(bHas) - Number(aHas);
-  });
-
-  // Python does this kind of logic by repeatedly checking until the TR client is ready.
-  // Here we:
-  // - loop over candidates
-  // - parse install dir
-  // - retry reading the lockfile a few times (short sleep) before moving on
-  for (const candidate of orderedCandidates) {
-    const parsed = parseInstallDirAndPort(candidate.cmdLine);
-    if (!parsed) continue;
-
-    let lock = null;
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      lock = readLockfile(parsed.installDirectory);
-      if (lock) break;
-      await sleep(200);
+  // --app-port=12345 or --app-port 12345
+  {
+    const m = cmdline.match(/--app-port(?:=|\s+)(\d+)/i);
+    if (m) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n)) port = n;
     }
-    if (!lock) continue;
-
-    return {
-      installDirectory: parsed.installDirectory,
-      port: lock.port,
-      password: lock.password,
-    };
   }
 
-  return null;
-};
+  return { installDir, port };
+}
 
-const getGameflowPhase = async () => {
-  // /lol-gameflow/v1/gameflow-phase is a very convenient endpoint.
-  // It returns a string like:
-  //   "None", "Lobby", "Matchmaking", "ChampSelect", "InProgress", "EndOfGame", ...
-  // We use it to detect "game started" and other states.
-  const conn = await getLcuConnection();
-  if (!conn) return null;
+function extractDirAndPortFromCmd({ live = false } = {}) {
+  const cmdlines = powershellGetLeagueClientUxCmdlines();
+  let found = false;
+  let installDir = null;
+  let port = null;
+  let client = null;
 
-  try {
-    const phase = await lcuGet(conn, '/lol-gameflow/v1/gameflow-phase');
-    return typeof phase === 'string' ? phase : null;
-  } catch {
-    return null;
-  }
-};
+  for (const cmd of cmdlines) {
+    const lower = String(cmd).toLowerCase();
+    if (!live) {
+      // TR mode: pick the Tournament Realm client
+      if (!lower.includes('loltmnt')) continue;
 
-const formatStatus = (phase) => {
-  // Convert raw phase string into boolean flags that are easy to reason about.
-  // Note: This is *not* the same as the Live Client API (2999). This is the LCU
-  // (the client) and lets you detect Champ Select before the match actually starts.
-  const inSession = Boolean(phase && phase !== 'None');
-  const inChampSelect = phase === 'ChampSelect';
-  const inGame = phase === 'InProgress';
-  return { phase, inSession, inChampSelect, inGame };
-};
-
-const parseArgs = () => {
-  // CLI flags:
-  //   --once           : run a single check and exit
-  //   --interval=2000  : poll interval in milliseconds (when not using --once)
-  const args = process.argv.slice(2);
-  const once = args.includes('--once');
-
-  let intervalMs = 2000;
-  const intervalArg = args.find((a) => a.startsWith('--interval='));
-  if (intervalArg) {
-    const value = Number(intervalArg.split('=')[1]);
-    if (Number.isFinite(value) && value >= 250) intervalMs = value;
-  }
-
-  return { once, intervalMs };
-};
-
-const main = async () => {
-  const { once, intervalMs } = parseArgs();
-
-  let lastPrinted = null;
-  let warnedNonTr = false;
-
-  while (true) {
-    const phase = await getGameflowPhase();
-    const status = formatStatus(phase);
-
-    if (!warnedNonTr) {
-      try {
-        const procs = await getLeagueClientProcesses();
-        const hasTr = procs.some((p) => `${p.exePath} ${p.cmdLine}`.toLowerCase().includes('loltmnt'));
-        if (procs.length > 0 && !hasTr) {
-          warnedNonTr = true;
-          console.log('[note] No "loltmnt" detected in LeagueClientUx.exe path/args; using the first available client.');
+      // Mirror the Python split heuristic
+      for (const segment of String(cmd).split('" "')) {
+        if (segment.includes('--app-port')) {
+          const m = segment.match(/--app-port(?:=|\s+)(\d+)/i);
+          if (m) port = Number(m[1]);
         }
-      } catch {
-        // ignore
+        if (segment.includes('--install-directory')) {
+          const m = segment.match(/--install-directory(?:=|\s+)(.+)$/i);
+          if (m) installDir = String(m[1]).replace(/^"|"$/g, '');
+        }
+      }
+
+      const cm = String(cmd).match(/loltmnt(\d+)/i);
+      client = cm ? cm[1] : 'TR';
+      found = true;
+      break;
+    }
+
+    // Live mode: skip esports/tournament process lines and take the normal client.
+    if (lower.includes('esportstmnt')) continue;
+
+    for (const segment of String(cmd).split('" "')) {
+      if (segment.includes('--app-port')) {
+        const m = segment.match(/--app-port(?:=|\s+)(\d+)/i);
+        if (m) port = Number(m[1]);
+      }
+      if (segment.includes('--install-directory')) {
+        const m = segment.match(/--install-directory(?:=|\s+)(.+)$/i);
+        if (m) installDir = String(m[1]).replace(/^"|"$/g, '');
       }
     }
+    client = 'Live';
+    found = true;
+    break;
+  }
 
-    const key = JSON.stringify(status);
-    if (key !== lastPrinted) {
-      lastPrinted = key;
-      const ts = new Date().toISOString();
-      // Only prints when something changes, to keep the output readable.
-      console.log(`[${ts}] phase=${status.phase ?? 'null'} inSession=${status.inSession} inChampSelect=${status.inChampSelect} inGame=${status.inGame}`);
+  if (!found) return { installDir: null, port: null, client: null };
+  return {
+    installDir: installDir && String(installDir).trim() ? String(installDir).trim() : null,
+    port: Number.isFinite(Number(port)) ? Number(port) : null,
+    client,
+  };
+}
+
+function findLockfileFromRunningClient({ live = false } = {}) {
+  const { installDir } = extractDirAndPortFromCmd({ live });
+  if (!installDir) return null;
+  const lf = path.join(installDir, 'lockfile');
+  if (fs.existsSync(lf) && fs.statSync(lf).isFile()) return lf;
+  return null;
+}
+
+function* iterLockfileCandidates() {
+  const envPath = process.env.LEAGUE_LOCKFILE;
+  if (envPath) {
+    yield envPath;
+    yield path.join(envPath, 'lockfile');
+  }
+
+  if (!isWindows()) return;
+
+  const localappdata = process.env.LOCALAPPDATA;
+  const programfiles = process.env.PROGRAMFILES;
+  const programfilesx86 = process.env['PROGRAMFILES(X86)'];
+
+  const roots = [
+    localappdata ? path.join(localappdata, 'Riot Games') : null,
+    programfiles ? path.join(programfiles, 'Riot Games') : null,
+    programfilesx86 ? path.join(programfilesx86, 'Riot Games') : null,
+    'C:\\Riot Games',
+    'C:\\Program Files\\Riot Games',
+    'C:\\Program Files (x86)\\Riot Games',
+  ].filter(Boolean);
+
+  // Common direct locations
+  for (const root of roots) {
+    yield path.join(root, 'League of Legends', 'lockfile');
+  }
+}
+
+function findLockfile(explicitPath, { live = false } = {}) {
+  if (explicitPath) {
+    const p = fs.existsSync(explicitPath) && fs.statSync(explicitPath).isDirectory()
+      ? path.join(explicitPath, 'lockfile')
+      : explicitPath;
+    if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+    throw lcuError(`Lockfile not found at: ${p}`);
+  }
+
+  const running = findLockfileFromRunningClient({ live });
+  if (running) return running;
+
+  const seen = new Set();
+  const candidates = [];
+  for (const cand of iterLockfileCandidates()) {
+    if (!cand || seen.has(cand)) continue;
+    seen.add(cand);
+    if (!fs.existsSync(cand)) continue;
+    try {
+      if (!fs.statSync(cand).isFile()) continue;
+    } catch {
+      continue;
     }
 
-    if (once) break;
-    await sleep(intervalMs);
+    const lower = cand.toLowerCase();
+    // Skip Riot Client config lockfiles; they are not the LCU API lockfile.
+    if (lower.includes('riot client') && (lower.includes('\\config\\lockfile') || lower.includes('/config/lockfile'))) {
+      continue;
+    }
+    // Prefer League of Legends / TR client installs
+    if (!lower.includes('league of legends') && !lower.includes('loltmnt')) continue;
+
+    candidates.push(cand);
   }
+
+  candidates.sort((a, b) => {
+    const aTr = a.toLowerCase().includes('loltmnt') ? 1 : 0;
+    const bTr = b.toLowerCase().includes('loltmnt') ? 1 : 0;
+    return bTr - aTr;
+  });
+
+  if (candidates.length > 0) return candidates[0];
+
+  throw lcuError('Lockfile not found. Set LEAGUE_LOCKFILE or pass lockfilePath.');
+}
+
+function withTimeout(timeoutMs) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), Math.max(1, Number(timeoutMs || 0)));
+  return { signal: controller.signal, cancel: () => clearTimeout(t) };
+}
+
+function basicAuthHeader(username, password) {
+  const token = Buffer.from(`${username}:${password}`, 'utf8').toString('base64');
+  return `Basic ${token}`;
+}
+
+async function lcuFetchJson({ url, timeoutMs, verifyTls, headers }) {
+  try {
+    const u = new URL(url);
+    const isHttps = u.protocol === 'https:';
+    const client = isHttps ? https : http;
+
+    const response = await new Promise((resolve, reject) => {
+      /** @type {any} */
+      const options = {
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port ? Number(u.port) : (isHttps ? 443 : 80),
+        method: 'GET',
+        path: `${u.pathname}${u.search || ''}`,
+        headers,
+      };
+
+      // LCU uses a self-signed cert; mirror Python requests(verify=False)
+      if (isHttps) {
+        options.rejectUnauthorized = verifyTls === true;
+      }
+
+      const req = client.request(options, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          body += chunk;
+          if (body.length > 5_000_000) {
+            // Safety cap to avoid runaway memory on unexpected responses.
+            req.destroy(new Error('LCU response too large'));
+          }
+        });
+        res.on('end', () => resolve({ status: res.statusCode || 0, body }));
+      });
+
+      req.on('error', reject);
+
+      const ms = Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 2000;
+      req.setTimeout(ms, () => {
+        req.destroy(new Error(`timeout after ${ms}ms`));
+      });
+
+      req.end();
+    });
+
+    if (response.status === 404) throw lcuError('LCU API returned 404 (not in champ select or endpoint unavailable).');
+    if (response.status >= 400) {
+      throw lcuError(`LCU API error ${response.status}: ${String(response.body).slice(0, 300)}`);
+    }
+
+    let data;
+    try {
+      data = JSON.parse(response.body);
+    } catch {
+      throw lcuError('LCU API did not return JSON.');
+    }
+
+    if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+      throw lcuError('Unexpected response shape from LCU API (expected JSON object).');
+    }
+
+    return data;
+  } catch (e) {
+    if (e && typeof e === 'object' && e.name === 'LcuError') throw e;
+    const extra = e && typeof e === 'object'
+      ? (e.code ? ` code=${e.code}` : '')
+      : '';
+    throw lcuError(`LCU API not reachable. Tried ${url} (${e && e.name ? e.name : 'Error'}${extra}).`);
+  }
+}
+
+/**
+ * @param {{ lockfilePath?:string, lcuConfig?:{timeoutMs?:number, verifyTls?:boolean, protocol?:('http'|'https')|null} }} opts
+ */
+async function fetchChampSelectSession(opts = {}) {
+  const lockfilePath = findLockfile(
+    opts.lockfilePath || process.env.LEAGUE_LOCKFILE || null,
+    { live: opts.live === true }
+  );
+  const lcuConfig = opts.lcuConfig || {};
+
+  const contents = readLockfile(lockfilePath);
+  const auth = parseLockfile(contents);
+
+  const protocol = (lcuConfig.protocol === 'http' || lcuConfig.protocol === 'https') ? lcuConfig.protocol : auth.protocol;
+  const port = auth.port;
+  const url = `${protocol}://127.0.0.1:${port}/lol-champ-select/v1/session`;
+
+  const headers = {
+    Authorization: basicAuthHeader('riot', auth.password),
+  };
+
+
+  return await lcuFetchJson({
+    url,
+    timeoutMs: Number.isFinite(Number(lcuConfig.timeoutMs)) ? Number(lcuConfig.timeoutMs) : 2000,
+    verifyTls: lcuConfig.verifyTls === true,
+    headers,
+  });
+}
+
+const DRAFT_SEQUENCE = [
+  'BB1', 'RB1', 'BB2', 'RB2', 'BB3', 'RB3',
+  'BP1', 'RP1', 'RP2', 'BP2', 'BP3', 'RP3',
+  'RB4', 'BB4', 'RB5', 'BB5',
+  'RP4', 'BP4', 'BP5', 'RP5',
+];
+
+function parseDraftSlots(champSelectSession, { championIdToName } = {}) {
+  const resolveName = (cid) => {
+    if (Number.isInteger(cid) && championIdToName && typeof championIdToName === 'object') {
+      return championIdToName[cid] || null;
+    }
+    return null;
+  };
+
+  const blueBans = [];
+  const redBans = [];
+  const bluePicks = [];
+  const redPicks = [];
+
+  const pushAction = (a) => {
+    const aType = a && typeof a === 'object' ? a.type : null;
+    if (aType !== 'ban' && aType !== 'pick') return;
+    if (a.completed !== true) return;
+
+    const champId = a.championId;
+    if (!Number.isInteger(champId) || champId <= 0) return;
+
+    const isBlue = Boolean(a.isAllyAction);
+    const payload = {
+      championId: champId,
+      championName: resolveName(champId),
+      actorCellId: a.actorCellId,
+      pickTurn: a.pickTurn,
+    };
+
+    if (aType === 'ban') (isBlue ? blueBans : redBans).push(payload);
+    else (isBlue ? bluePicks : redPicks).push(payload);
+  };
+
+  const actions = champSelectSession && typeof champSelectSession === 'object' ? champSelectSession.actions : null;
+  if (Array.isArray(actions)) {
+    for (const actionGroup of actions) {
+      if (!Array.isArray(actionGroup)) continue;
+      const group = actionGroup.filter((x) => x && typeof x === 'object' && !Array.isArray(x));
+      group.sort((x, y) => {
+        const xPickMissing = (x.pickTurn === null || x.pickTurn === undefined);
+        const yPickMissing = (y.pickTurn === null || y.pickTurn === undefined);
+        if (xPickMissing !== yPickMissing) return xPickMissing ? 1 : -1;
+
+        const xPick = Number.isFinite(Number(x.pickTurn)) ? Number(x.pickTurn) : 0;
+        const yPick = Number.isFinite(Number(y.pickTurn)) ? Number(y.pickTurn) : 0;
+        if (xPick !== yPick) return xPick - yPick;
+
+        const xId = Number.isFinite(Number(x.id)) ? Number(x.id) : 0;
+        const yId = Number.isFinite(Number(y.id)) ? Number(y.id) : 0;
+        if (xId !== yId) return xId - yId;
+
+        const xCell = Number.isFinite(Number(x.actorCellId)) ? Number(x.actorCellId) : 0;
+        const yCell = Number.isFinite(Number(y.actorCellId)) ? Number(y.actorCellId) : 0;
+        return xCell - yCell;
+      });
+      for (const a of group) pushAction(a);
+    }
+  }
+
+  const slots = Object.fromEntries(DRAFT_SEQUENCE.map((k) => [k, null]));
+
+  const setSlot = (prefix, i, src) => {
+    const idx = i - 1;
+    if (idx < 0 || idx >= src.length) return;
+    const champName = src[idx] && src[idx].championName;
+    const champId = src[idx] && src[idx].championId;
+    slots[`${prefix}${i}`] = champName || (champId !== null && champId !== undefined ? String(champId) : null);
+  };
+
+  for (let i = 1; i <= 5; i++) {
+    setSlot('BB', i, blueBans);
+    setSlot('RB', i, redBans);
+  }
+  for (let i = 1; i <= 5; i++) {
+    setSlot('BP', i, bluePicks);
+    setSlot('RP', i, redPicks);
+  }
+
+  return {
+    sequence: [...DRAFT_SEQUENCE],
+    slots,
+    blueBans,
+    redBans,
+    bluePicks,
+    redPicks,
+  };
+}
+
+async function draftSlotsFromLcu({ lockfilePath, lcuConfig, championIdToName, live } = {}) {
+  const session = await fetchChampSelectSession({ lockfilePath, lcuConfig, live });
+  return parseDraftSlots(session, { championIdToName });
+}
+
+function extractIngameRoleMapping(allGameData) {
+  const players = allGameData && typeof allGameData === 'object' ? allGameData.allPlayers : null;
+  if (!Array.isArray(players)) return { BLUE: {}, RED: {} };
+
+  const teamColor = (team) => {
+    if (team === 'ORDER') return 'BLUE';
+    if (team === 'CHAOS') return 'RED';
+    return null;
+  };
+
+  const normRole = (pos) => {
+    if (typeof pos !== 'string' || !pos) return null;
+    const v = pos.trim().toUpperCase();
+    const mapping = {
+      TOP: 'TOP',
+      JUNGLE: 'JUNGLE',
+      MIDDLE: 'MID',
+      MID: 'MID',
+      BOTTOM: 'BOT',
+      BOT: 'BOT',
+      UTILITY: 'SUP',
+      SUPPORT: 'SUP',
+    };
+    return mapping[v] || null;
+  };
+
+  const hasSmite = (p) => {
+    const spells = p && typeof p === 'object' ? p.summonerSpells : null;
+    if (!spells || typeof spells !== 'object') return false;
+    for (const key of ['summonerSpellOne', 'summonerSpellTwo']) {
+      const s = spells[key];
+      const name = s && typeof s === 'object' ? s.displayName : null;
+      if (typeof name === 'string' && name.toLowerCase().includes('smite')) return true;
+    }
+    return false;
+  };
+
+  const SUPPORT_ITEM_IDS = new Set([
+    3865, 3866, 3867, 3869, // World Atlas line
+    3850, 3851, 3854, 3855, // older starters
+  ]);
+
+  const hasSupportItem = (p) => {
+    const items = p && typeof p === 'object' ? p.items : null;
+    if (!Array.isArray(items)) return false;
+    for (const it of items) {
+      if (!it || typeof it !== 'object') continue;
+      const iid = it.itemID;
+      if (Number.isInteger(iid) && SUPPORT_ITEM_IDS.has(iid)) return true;
+    }
+    return false;
+  };
+
+  const hasTeleport = (p) => {
+    const spells = p && typeof p === 'object' ? p.summonerSpells : null;
+    if (!spells || typeof spells !== 'object') return false;
+    for (const key of ['summonerSpellOne', 'summonerSpellTwo']) {
+      const s = spells[key];
+      const name = s && typeof s === 'object' ? s.displayName : null;
+      if (typeof name === 'string' && name.toLowerCase().includes('teleport')) return true;
+    }
+    return false;
+  };
+
+  const creepScore = (p) => {
+    const scores = p && typeof p === 'object' ? p.scores : null;
+    const cs = scores && typeof scores === 'object' ? scores.creepScore : 0;
+    return (Number.isFinite(cs) ? Math.trunc(cs) : 0);
+  };
+
+  // First try the official position if it exists (not NONE)
+  const out = { BLUE: {}, RED: {} };
+  let anyPosition = false;
+
+  for (const p of players) {
+    if (!p || typeof p !== 'object') continue;
+    const role = normRole(p.position);
+    if (role !== null) {
+      anyPosition = true;
+      const color = teamColor(p.team);
+      const champ = p.championName;
+      if (color && typeof champ === 'string' && champ) {
+        out[color][role] = champ;
+      }
+    }
+  }
+
+  if (anyPosition) return out;
+
+  // Heuristics fallback when position is NONE for all players.
+  const assignTeam = (teamName, color) => {
+    const teamPlayers = players.filter((p) => p && typeof p === 'object' && p.team === teamName);
+    if (teamPlayers.length === 0) return;
+
+    let remaining = [...teamPlayers];
+
+    // JUNGLE: Smite
+    const junglers = remaining.filter((p) => hasSmite(p));
+    if (junglers.length > 0) {
+      let best = junglers[0];
+      for (const j of junglers) if (creepScore(j) > creepScore(best)) best = j;
+      out[color].JUNGLE = best.championName;
+      remaining = remaining.filter((p) => p !== best);
+    }
+
+    // SUP: support item, otherwise lowest CS
+    const supports = remaining.filter((p) => hasSupportItem(p));
+    let s = null;
+    if (supports.length > 0) {
+      s = supports.reduce((acc, cur) => (creepScore(cur) < creepScore(acc) ? cur : acc), supports[0]);
+    } else if (remaining.length > 0) {
+      s = remaining.reduce((acc, cur) => (creepScore(cur) < creepScore(acc) ? cur : acc), remaining[0]);
+    }
+
+    if (s) {
+      out[color].SUP = s.championName;
+      remaining = remaining.filter((p) => p !== s);
+    }
+
+    // BOT: prefer non-TP highest CS (usually ADC)
+    const nonTp = remaining.filter((p) => !hasTeleport(p));
+    let b = null;
+    if (nonTp.length > 0) {
+      b = nonTp.reduce((acc, cur) => (creepScore(cur) > creepScore(acc) ? cur : acc), nonTp[0]);
+    } else if (remaining.length > 0) {
+      b = remaining.reduce((acc, cur) => (creepScore(cur) > creepScore(acc) ? cur : acc), remaining[0]);
+    }
+
+    if (b) {
+      out[color].BOT = b.championName;
+      remaining = remaining.filter((p) => p !== b);
+    }
+
+    // Remaining two: MID vs TOP by CS (higher -> MID)
+    if (remaining.length >= 2) {
+      remaining.sort((a, b) => creepScore(b) - creepScore(a));
+      out[color].MID = remaining[0].championName;
+      out[color].TOP = remaining[1].championName;
+    } else if (remaining.length === 1) {
+      out[color].MID = remaining[0].championName;
+    }
+  };
+
+  assignTeam('ORDER', 'BLUE');
+  assignTeam('CHAOS', 'RED');
+
+  // Stable keys
+  for (const c of ['BLUE', 'RED']) {
+    for (const r of ['TOP', 'JUNGLE', 'MID', 'BOT', 'SUP']) {
+      if (!Object.prototype.hasOwnProperty.call(out[c], r)) out[c][r] = null;
+    }
+  }
+
+  return out;
+}
+
+export {
+  DRAFT_SEQUENCE,
+  parseLockfile,
+  findLockfile,
+  parseDraftSlots,
+  fetchChampSelectSession,
+  draftSlotsFromLcu,
+  extractIngameRoleMapping,
 };
 
-main().catch((err) => {
-  console.error('lol_lcu_watch failed:', err);
-  process.exitCode = 1;
-});
+export const debug = {
+  extractDirAndPortFromCmd,
+  powershellGetLeagueClientUxCmdlines,
+};
+
+export const errors = {
+  lcuError,
+  liveClientError,
+};
+
+export default {
+  DRAFT_SEQUENCE,
+  parseLockfile,
+  findLockfile,
+  parseDraftSlots,
+  fetchChampSelectSession,
+  draftSlotsFromLcu,
+  extractIngameRoleMapping,
+  debug,
+  errors,
+};

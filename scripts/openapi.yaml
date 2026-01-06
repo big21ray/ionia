@@ -1,0 +1,253 @@
+openapi: 3.0.3
+info:
+  title: Ionia Ingestion API
+  version: 1.1.0
+  description: >
+    API used by Ionia Electron clients and Global Python services
+    to activate installations, report game lifecycle events,
+    and attach POV streams.
+
+servers:
+  - url: https://api.ionia.gg
+
+security:
+  - BearerAuth: []
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API_KEY
+
+  schemas:
+
+    Ack:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+    GameIdResponse:
+      type: object
+      properties:
+        game_id:
+          type: string
+          example: g_20260106_1842_abcd
+
+    ActivationRequest:
+      type: object
+      required:
+        - validation_key
+        - machine_fingerprint
+        - app_version
+      properties:
+        validation_key:
+          type: string
+          example: IONIA-KC-2026-8FJ3A
+        machine_fingerprint:
+          type: string
+          example: win-abc123
+        app_version:
+          type: string
+          example: 1.0.0
+
+    ActivationResponse:
+      type: object
+      properties:
+        bearer:
+          type: string
+          example: kc_2026_secret_x9f3
+        team_id:
+          type: string
+          example: KC
+
+    DraftSnapshot:
+      type: object
+      additionalProperties:
+        type: string
+      example:
+        BB1: Azir
+        BP1: Maokai
+        RP1: Rell
+
+    StreamReady:
+      type: object
+      required:
+        - game_id
+        - role
+        - vod_url
+        - platform
+      properties:
+        game_id:
+          type: string
+        role:
+          type: string
+          enum: [TOP, JUNGLE, MID, ADC, SUPPORT, GLOBAL]
+        vod_url:
+          type: string
+        platform:
+          type: string
+          enum: [server, youtube]
+        player_id:
+          type: string
+          nullable: true
+
+paths:
+
+  /activate:
+    post:
+      summary: Activate an Ionia installation using a validation key
+      description: >
+        One-time activation endpoint. Exchanges a validation key
+        for a long-lived Bearer token linked to a team and install.
+      security: []   # No Bearer required
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivationRequest"
+      responses:
+        "200":
+          description: Activation successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivationResponse"
+        "400":
+          description: Invalid or expired validation key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /client/heartbeat:
+    post:
+      summary: Register or heartbeat a client installation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - player_id
+                - role
+                - version
+              properties:
+                player_id:
+                  type: string
+                role:
+                  type: string
+                version:
+                  type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ack"
+
+  /events/champ_select_start:
+    post:
+      summary: Notify that champion select has started
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - timestamp
+              properties:
+                timestamp:
+                  type: integer
+                  description: Unix timestamp (seconds)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ack"
+
+  /events/draft_complete:
+    post:
+      summary: Submit final draft snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - timestamp
+                - draft
+              properties:
+                timestamp:
+                  type: integer
+                draft:
+                  $ref: "#/components/schemas/DraftSnapshot"
+      responses:
+        "200":
+          description: Draft accepted and game_id assigned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GameIdResponse"
+
+  /events/game_start:
+    post:
+      summary: Notify that the game has started and roles are resolved
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - game_id
+                - positions
+              properties:
+                game_id:
+                  type: string
+                positions:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  example:
+                    BM: Azir
+                    RJ: Vi
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ack"
+
+  /events/stream_ready:
+    post:
+      summary: Attach a POV stream to a game
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StreamReady"
+      responses:
+        "200":
+          description: Stream attached
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ack"
