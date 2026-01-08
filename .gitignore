@@ -80,6 +80,51 @@ coverage/
 # Optional REPL history
 .node_repl_history
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+*.py.bak
+
+# Virtual Environments
+.ionia_api/
+**/.ionia_api/
+.venv/
+venv/
+env/
+
 # Output of 'npm pack'
 *.tgz
 
@@ -97,6 +142,10 @@ ffmpeg.exe
 # Video thumbnails cache (if stored locally)
 thumbnails/
 .cache/
+
+# Jupyter
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
 
 # Video files (should not be committed to git)
 *.mp4

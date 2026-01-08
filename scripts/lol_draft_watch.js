@@ -9,10 +9,19 @@ import {
   parseLockfile,
   fetchChampSelectSession,
   parseDraftSlots,
+  extractMetadata,
+  readLockfile,
+  getGameflowPhase,
 } from './lol_lcu_watch.js';
 
+const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
+const BEARER_TOKEN = process.env.BEARER_TOKEN || '';
 const DEFAULT_INTERVAL_MS = 10_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+if (!BEARER_TOKEN) {
+  console.warn('[lol_draft_watch] WARNING: BEARER_TOKEN not set. API calls will fail.');
+}
 
 const requestJson = async ({ url, headers, timeoutMs = 2000, verifyTls = false }) => {
   const lib = url.startsWith('https:') ? https : http;
@@ -48,6 +57,59 @@ const requestJson = async ({ url, headers, timeoutMs = 2000, verifyTls = false }
     });
     req.on('error', reject);
     req.end();
+  });
+};
+
+/**
+ * POST request to backend API.
+ */
+const postToBackend = async (endpoint, payload) => {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`${BACKEND_URL}${endpoint}`);
+    const lib = url.protocol === 'https:' ? https : http;
+
+    const body = JSON.stringify(payload);
+    const options = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+      timeout: 5000,
+    };
+
+    if (BEARER_TOKEN) {
+      options.headers.Authorization = `Bearer ${BEARER_TOKEN}`;
+    }
+
+    const req = lib.request(url, options, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => {
+        const status = res.statusCode || 0;
+        if (status >= 400) {
+          reject(new Error(`HTTP ${status}: ${data}`));
+        } else {
+          try {
+            resolve(data ? JSON.parse(data) : null);
+          } catch {
+            resolve(data);
+          }
+        }
+      });
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('Request timeout'));
+    });
+
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+};
   });
 };
 
@@ -173,6 +235,12 @@ const parseArgs = () => {
 const main = async () => {
   const { intervalMs, once, showFull } = parseArgs();
 
+  if (!BEARER_TOKEN) {
+    console.error('[lol_draft_watch] ERROR: BEARER_TOKEN is required. Exiting.');
+    process.exitCode = 1;
+    return;
+  }
+
   let lockfilePath;
   try {
     lockfilePath = findLockfile(process.env.LEAGUE_LOCKFILE || null, { live: false });
@@ -183,14 +251,70 @@ const main = async () => {
   }
 
   let lastKey = null;
+  let activeGameId = null;
+  let lastDraftJson = null;
 
   while (true) {
     const ts = new Date().toISOString();
     const phase = await getGameflowPhase({ lockfilePath });
 
+    // Handle phase transitions
+    if (phase === 'ChampSelect' && !activeGameId) {
+      // ChampSelect started - initialize game
+      try {
+        const session = await fetchChampSelectSession({ lockfilePath, live: false });
+        const contents = readLockfile(lockfilePath);
+        const auth = parseLockfile(contents);
+        const metadata = await extractMetadata(session, { lockfilePath, lcuAuth: auth });
+
+        const payload = {
+          date: metadata.date,
+          opposite_team: metadata.oppositeTeam || 'Unknown',
+          patch: metadata.patch || 'Unknown',
+          tr: metadata.tr ? 'true' : 'false',
+          side: metadata.side || 'UNKNOWN',
+        };
+
+        console.log(`[${ts}] POST /events/champ_select_start`);
+        const response = await postToBackend('/events/champ_select_start', payload);
+        activeGameId = response?.game_id;
+        console.log(`[${ts}] game_id=${activeGameId}`);
+      } catch (err) {
+        console.error(`[${ts}] Error starting game:`, err.message);
+      }
+    } else if (phase !== 'ChampSelect' && activeGameId) {
+      // Left ChampSelect phase
+      if (phase === 'InProgress') {
+        // Game started
+        try {
+          const payload = {
+            game_id: activeGameId,
+            positions: {},
+          };
+          console.log(`[${ts}] POST /events/game_start (game_id=${activeGameId})`);
+          await postToBackend('/events/game_start', payload);
+        } catch (err) {
+          console.error(`[${ts}] Error posting game_start:`, err.message);
+        }
+      } else if (phase === 'EndOfGame') {
+        // Game ended
+        try {
+          const payload = {
+            game_id: activeGameId,
+            win: 'W',
+          };
+          console.log(`[${ts}] POST /events/game_finished (game_id=${activeGameId})`);
+          await postToBackend('/events/game_finished', payload);
+        } catch (err) {
+          console.error(`[${ts}] Error posting game_finished:`, err.message);
+        }
+        activeGameId = null;
+        lastDraftJson = null;
+      }
+    }
+
     if (phase !== 'ChampSelect') {
       const key = `phase=${phase ?? 'null'}`;
-      // Requested behavior: print every interval even if unchanged.
       lastKey = key;
       console.log(`[${ts}] phase=${phase ?? 'null'} (not in champ select)`);
 
@@ -219,6 +343,24 @@ const main = async () => {
 
     const parsed = parseDraftSlots(session, { championIdToName });
     const slots = parsed?.slots && typeof parsed.slots === 'object' ? parsed.slots : {};
+
+    // Post draft updates if there's an active game
+    if (activeGameId) {
+      const currentDraftJson = JSON.stringify(slots);
+      if (lastDraftJson !== currentDraftJson) {
+        try {
+          const payload = {
+            game_id: activeGameId,
+            draft: slots,
+          };
+          console.log(`[${ts}] POST /events/draft_complete (game_id=${activeGameId})`);
+          await postToBackend('/events/draft_complete', payload);
+          lastDraftJson = currentDraftJson;
+        } catch (err) {
+          console.error(`[${ts}] Error posting draft_complete:`, err.message);
+        }
+      }
+    }
 
     // Champ select timer state (when present) can indicate FINALIZATION.
     const timerPhase = session?.timer?.phase ? String(session.timer.phase) : null;

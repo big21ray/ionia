@@ -466,6 +466,130 @@ async function draftSlotsFromLcu({ lockfilePath, lcuConfig, championIdToName, li
   return parseDraftSlots(session, { championIdToName });
 }
 
+/**
+ * Check if League Client is running and lockfile is accessible.
+ * @param {{ lockfilePath?: string, live?: boolean }} opts
+ * @returns {Promise<{ found: boolean, path: string | null, error: string | null }>}
+ */
+async function isClientUp(opts = {}) {
+  try {
+    const path = findLockfile(opts.lockfilePath || process.env.LEAGUE_LOCKFILE || null, { live: opts.live === true });
+    return { found: true, path, error: null };
+  } catch (e) {
+    return { found: false, path: null, error: String(e && e.message ? e.message : e) };
+  }
+}
+
+/**
+ * Get the current gameflow phase (e.g., "ChampSelect", "InProgress", "EndOfGame").
+ * @param {{ lockfilePath?: string, lcuConfig?: any }} opts
+ * @returns {Promise<string | null>}
+ */
+async function getGameflowPhase(opts = {}) {
+  try {
+    const lockfilePath = findLockfile(
+      opts.lockfilePath || process.env.LEAGUE_LOCKFILE || null,
+      { live: opts.live === true }
+    );
+    const contents = readLockfile(lockfilePath);
+    const auth = parseLockfile(contents);
+
+    const protocol = (opts.lcuConfig?.protocol === 'http' || opts.lcuConfig?.protocol === 'https') ? opts.lcuConfig.protocol : auth.protocol;
+    const url = `${protocol}://127.0.0.1:${auth.port}/lol-gameflow/v1/gameflow-phase`;
+
+    const headers = {
+      Authorization: basicAuthHeader('riot', auth.password),
+    };
+
+    const phase = await lcuFetchJson({
+      url,
+      timeoutMs: opts.lcuConfig?.timeoutMs || 1500,
+      verifyTls: opts.lcuConfig?.verifyTls === true,
+      headers,
+    });
+
+    return typeof phase === 'string' ? phase : null;
+  } catch {
+    return null;
+  }
+}
+
+async function extractMetadata(champSelectSession, { lockfilePath, lcuAuth } = {}) {
+  /**
+   * Extract game metadata from champ select session and LCU config.
+   * Returns: { side, patch, oppositeTeam, tr, date }
+   */
+  const metadata = {
+    side: null,
+    patch: null,
+    oppositeTeam: null,
+    tr: false,
+    date: new Date().toISOString().split('T')[0],
+  };
+
+  if (!champSelectSession || typeof champSelectSession !== 'object') return metadata;
+
+  // Extract side (BLUE/RED) from localPlayerCellId
+  const cellId = champSelectSession.localPlayerCellId;
+  if (Number.isFinite(Number(cellId))) {
+    metadata.side = Number(cellId) < 5 ? 'BLUE' : 'RED';
+  }
+
+  // Extract opposite team names from myTeam/theirTeam
+  try {
+    const myTeam = champSelectSession.myTeam || [];
+    const theirTeam = champSelectSession.theirTeam || [];
+
+    if (Array.isArray(theirTeam) && theirTeam.length > 0) {
+      const oppositeNames = theirTeam
+        .map((p) => (typeof p?.summonerName === 'string' ? p.summonerName.trim() : null))
+        .filter(Boolean);
+      if (oppositeNames.length > 0) {
+        metadata.oppositeTeam = oppositeNames.join(', ');
+      }
+    }
+  } catch {
+    // Ignore errors when extracting team names
+  }
+
+  // Extract patch from LCU config
+  if (lcuAuth && lockfilePath) {
+    try {
+      const { protocol, port, password } = lcuAuth;
+      const url = `${protocol}://127.0.0.1:${port}/lol-client-config/v3/install-settings`;
+      const auth = basicAuthHeader('riot', password);
+      const config = await lcuFetchJson({
+        url,
+        headers: { Authorization: auth },
+        timeoutMs: 1500,
+        verifyTls: false,
+      });
+
+      if (config && typeof config === 'object') {
+        const patchVersion = config.install_settings?.patch_version || config.patchVersion || null;
+        if (patchVersion) metadata.patch = String(patchVersion);
+      }
+    } catch {
+      // Ignore errors when fetching patch
+    }
+  }
+
+  // Detect Tournament Realm by checking LeagueClientUx process command line
+  try {
+    const cmdlines = powershellGetLeagueClientUxCmdlines();
+    for (const cmd of cmdlines) {
+      if (String(cmd).toLowerCase().includes('loltmnt')) {
+        metadata.tr = true;
+        break;
+      }
+    }
+  } catch {
+    // Ignore errors when checking for TR
+  }
+
+  return metadata;
+}
+
 function extractIngameRoleMapping(allGameData) {
   const players = allGameData && typeof allGameData === 'object' ? allGameData.allPlayers : null;
   if (!Array.isArray(players)) return { BLUE: {}, RED: {} };
@@ -630,6 +754,9 @@ export {
   fetchChampSelectSession,
   draftSlotsFromLcu,
   extractIngameRoleMapping,
+  extractMetadata,
+  isClientUp,
+  getGameflowPhase,
 };
 
 export const debug = {
@@ -650,6 +777,9 @@ export default {
   fetchChampSelectSession,
   draftSlotsFromLcu,
   extractIngameRoleMapping,
+  extractMetadata,
+  isClientUp,
+  getGameflowPhase,
   debug,
   errors,
 };
