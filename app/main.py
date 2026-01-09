@@ -9,14 +9,14 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
-from app.auth import (
+from auth import (
     BearerAuthMiddleware,
     issue_bearer_for_team,
     load_auth_config,
     require_team_id,
     validate_activation_key,
 )
-from app.models import (
+from models import (
     Ack,
     ActivationRequest,
     ActivationResponse,
@@ -29,7 +29,7 @@ from app.models import (
     HeartbeatRequest,
     StreamReadyRequest,
 )
-from app.sheets import GoogleSheetsWriter
+from sheets import GoogleSheetsWriter
 
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 logging.basicConfig(level=logging.INFO)
