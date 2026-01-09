@@ -128,6 +128,10 @@ env/
 # Output of 'npm pack'
 *.tgz
 
+# Keep Python dependency manifests
+!requirements.txt
+!app/requirements.txt
+
 # Yarn Integrity file
 .yarn-integrity
 
