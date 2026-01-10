@@ -20,6 +20,7 @@ class AuthConfig:
     validation_key_expires: Dict[str, int] = field(default_factory=dict)
     revoked_keys: Set[str] = field(default_factory=set)
     used_keys: Set[str] = field(default_factory=set)
+    admin_bearer: Optional[str] = None
 
 
 def _load_json_mapping(env_name: str) -> Dict[str, str]:
@@ -84,11 +85,13 @@ def load_auth_config() -> AuthConfig:
     api_keys = _load_json_mapping("IONIA_API_KEYS")
     validation_key_expires = _load_json_int_mapping("IONIA_VALIDATION_KEYS_EXPIRES")
     revoked_keys = _load_json_set("IONIA_VALIDATION_KEYS_REVOKED")
+    admin_bearer = os.getenv("IONIA_ADMIN_BEARER", "").strip() or None
     return AuthConfig(
         validation_keys=validation_keys,
         api_keys=api_keys,
         validation_key_expires=validation_key_expires,
         revoked_keys=revoked_keys,
+        admin_bearer=admin_bearer,
     )
 
 
@@ -130,6 +133,12 @@ def resolve_team_id(config: AuthConfig, bearer: str) -> Optional[str]:
     return config.api_keys.get(bearer)
 
 
+def is_admin_bearer(config: AuthConfig, bearer: str) -> bool:
+    if not config.admin_bearer:
+        return False
+    return bearer == config.admin_bearer
+
+
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, config: AuthConfig, public_paths: Optional[Set[str]] = None):
         super().__init__(app)
@@ -154,6 +163,16 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         if not bearer:
             return JSONResponse(status_code=401, content={"error": "missing bearer token"})
 
+        if path.startswith("/admin/"):
+            if not self.config.admin_bearer:
+                return JSONResponse(
+                    status_code=503, content={"error": "admin bearer not configured"}
+                )
+            if not is_admin_bearer(self.config, bearer):
+                return JSONResponse(status_code=401, content={"error": "invalid admin bearer"})
+            request.state.is_admin = True
+            return await call_next(request)
+
         team_id = resolve_team_id(self.config, bearer)
         if not team_id:
             return JSONResponse(status_code=401, content={"error": "invalid bearer token"})
@@ -168,3 +187,8 @@ def require_team_id(request: Request) -> str:
     if not team_id:
         raise HTTPException(status_code=401, detail="unauthorized")
     return team_id
+
+
+def require_admin(request: Request) -> None:
+    if not getattr(request.state, "is_admin", False):
+        raise HTTPException(status_code=401, detail="unauthorized")

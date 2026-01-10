@@ -13,6 +13,7 @@ from auth import (
     BearerAuthMiddleware,
     issue_bearer_for_team,
     load_auth_config,
+    require_admin,
     require_team_id,
     validate_activation_key,
 )
@@ -342,7 +343,7 @@ def stream_ready(payload: StreamReadyRequest, team_id: str = Depends(require_tea
 
 
 @app.post("/admin/add_team", response_model=Ack)
-def add_team(payload: TeamCreateRequest):
+def add_team(payload: TeamCreateRequest, _: None = Depends(require_admin)):
     row_index = sheets_writer.append_team_row(
         payload.team_id, payload.team_name, payload.league
     )
@@ -352,7 +353,7 @@ def add_team(payload: TeamCreateRequest):
 
 
 @app.post("/admin/add_player", response_model=Ack)
-def add_player(payload: PlayerCreateRequest):
+def add_player(payload: PlayerCreateRequest, _: None = Depends(require_admin)):
     row_index = sheets_writer.append_player_row(
         payload.player_id, payload.team_id, payload.role, payload.player_name
     )
