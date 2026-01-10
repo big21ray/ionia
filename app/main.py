@@ -380,9 +380,18 @@ def get_player(payload: PlayerLookupRequest, team_id: str = Depends(require_team
         return _error(404, "team not found")
     if target_team_id != team_id:
         return _error(403, "forbidden")
-    player_id = sheets_writer.find_player_id_by_team_and_name(
-        target_team_id, payload.player_name
-    )
+    if payload.player_name and payload.role:
+        return _error(400, "provide player_name or role, not both")
+    if not payload.player_name and not payload.role:
+        return _error(400, "provide player_name or role")
+    if payload.player_name:
+        player_id = sheets_writer.find_player_id_by_team_and_name(
+            target_team_id, payload.player_name
+        )
+    else:
+        player_id = sheets_writer.find_player_id_by_team_and_role(
+            target_team_id, payload.role or ""
+        )
     if not player_id:
         return _error(404, "player not found")
     return PlayerLookupResponse(player_id=player_id)

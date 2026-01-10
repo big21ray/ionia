@@ -156,7 +156,6 @@ components:
       type: object
       required:
         - team_tricode
-        - player_name
       properties:
         team_tricode:
           type: string
@@ -164,6 +163,12 @@ components:
         player_name:
           type: string
           example: Saken
+        role:
+          type: string
+          example: MID
+      oneOf:
+        - required: [team_tricode, player_name]
+        - required: [team_tricode, role]
 
     PlayerLookupResponse:
       type: object

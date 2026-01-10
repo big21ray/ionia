@@ -108,7 +108,8 @@ class PlayerCreateResponse(BaseModel):
 
 class PlayerLookupRequest(BaseModel):
     team_tricode: str
-    player_name: str
+    player_name: Optional[str] = None
+    role: Optional[str] = None
 
 
 class PlayerLookupResponse(BaseModel):

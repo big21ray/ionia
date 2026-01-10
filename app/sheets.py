@@ -301,6 +301,18 @@ class GoogleSheetsWriter:
                 return player_id
         return None
 
+    def find_player_id_by_team_and_role(self, team_id: str, role: str) -> Optional[str]:
+        rows = self._get_rows(self.players_range)
+        for row in rows:
+            if len(row) < 4:
+                continue
+            player_id = row[0]
+            row_role = row[2]
+            row_team_id = row[3]
+            if row_team_id == team_id and row_role == role:
+                return player_id
+        return None
+
     def load_dedupe_keys(self) -> List[str]:
         rows = self._get_rows(self.dedupe_range)
         keys: List[str] = []
