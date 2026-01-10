@@ -358,8 +358,11 @@ def add_team(payload: TeamCreateRequest, _: None = Depends(require_admin)):
 @app.post("/admin/add_player", response_model=PlayerCreateResponse)
 def add_player(payload: PlayerCreateRequest, _: None = Depends(require_admin)):
     player_id = str(uuid4())
+    team_id = sheets_writer.find_team_id_by_tricode(payload.team_tricode)
+    if not team_id:
+        return _error(400, "unknown team_tricode")
     row_index = sheets_writer.append_player_row(
-        player_id, payload.team_id, payload.role, payload.player_name
+        player_id, team_id, payload.role, payload.player_name
     )
     if sheets_writer.enabled and row_index is None:
         return _error(502, "failed to write player row to sheets")

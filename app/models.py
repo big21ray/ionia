@@ -96,7 +96,7 @@ class TeamCreateResponse(BaseModel):
 
 
 class PlayerCreateRequest(BaseModel):
-    team_id: str
+    team_tricode: str
     role: str
     player_name: str
 

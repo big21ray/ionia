@@ -127,13 +127,13 @@ components:
     PlayerCreateRequest:
       type: object
       required:
-        - team_id
+        - team_tricode
         - role
         - player_name
       properties:
-        team_id:
+        team_tricode:
           type: string
-          example: KC
+          example: FF15
         role:
           type: string
           example: MID

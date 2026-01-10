@@ -260,6 +260,17 @@ class GoogleSheetsWriter:
         row = [player_id, team_id, role, player_name]
         return self._append_row(self.players_range, row)
 
+    def find_team_id_by_tricode(self, team_tricode: str) -> Optional[str]:
+        rows = self._get_rows(self.teams_range)
+        for row in rows:
+            if len(row) < 2:
+                continue
+            team_id = row[0]
+            tricode = row[1]
+            if tricode == team_tricode:
+                return team_id
+        return None
+
     def load_dedupe_keys(self) -> List[str]:
         rows = self._get_rows(self.dedupe_range)
         keys: List[str] = []
