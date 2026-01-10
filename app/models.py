@@ -99,6 +99,7 @@ class PlayerCreateRequest(BaseModel):
     team_tricode: str
     role: str
     player_name: str
+    active: bool
 
 
 class PlayerCreateResponse(BaseModel):

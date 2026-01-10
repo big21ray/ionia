@@ -130,6 +130,7 @@ components:
         - team_tricode
         - role
         - player_name
+        - active
       properties:
         team_tricode:
           type: string
@@ -140,6 +141,9 @@ components:
         player_name:
           type: string
           example: Saken
+        active:
+          type: boolean
+          example: true
 
     PlayerCreateResponse:
       type: object
