@@ -83,3 +83,16 @@ class StreamReadyRequest(BaseModel):
     vod_url: str
     platform: StreamPlatform
     player_id: Optional[str] = None
+
+
+class TeamCreateRequest(BaseModel):
+    team_id: str
+    team_name: str
+    league: str
+
+
+class PlayerCreateRequest(BaseModel):
+    player_id: str
+    team_id: str
+    role: str
+    player_name: str

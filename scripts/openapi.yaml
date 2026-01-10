@@ -100,6 +100,44 @@ components:
           type: string
           nullable: true
 
+    TeamCreateRequest:
+      type: object
+      required:
+        - team_id
+        - team_name
+        - league
+      properties:
+        team_id:
+          type: string
+          example: KC
+        team_name:
+          type: string
+          example: Karmine Corp
+        league:
+          type: string
+          example: LEC
+
+    PlayerCreateRequest:
+      type: object
+      required:
+        - player_id
+        - team_id
+        - role
+        - player_name
+      properties:
+        player_id:
+          type: string
+          example: player_001
+        team_id:
+          type: string
+          example: KC
+        role:
+          type: string
+          example: MID
+        player_name:
+          type: string
+          example: Saken
+
 paths:
 
   /activate:
@@ -247,6 +285,40 @@ paths:
       responses:
         "200":
           description: Stream attached
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ack"
+
+  /admin/add_team:
+    post:
+      summary: Add a team entry for admin-managed teams sheet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamCreateRequest"
+      responses:
+        "200":
+          description: Team added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ack"
+
+  /admin/add_player:
+    post:
+      summary: Add a player entry for admin-managed players sheet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlayerCreateRequest"
+      responses:
+        "200":
+          description: Player added
           content:
             application/json:
               schema:

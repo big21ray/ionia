@@ -150,6 +150,7 @@ thumbnails/
 # Jupyter
 .ipynb_checkpoints/
 **/.ipynb_checkpoints/
+*.ipynb
 
 # Video files (should not be committed to git)
 *.mp4

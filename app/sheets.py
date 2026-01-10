@@ -20,6 +20,8 @@ class GoogleSheetsWriter:
         activations_range: Optional[str] = None,
         dedupe_range: Optional[str] = None,
         validation_keys_range: Optional[str] = None,
+        teams_range: Optional[str] = None,
+        players_range: Optional[str] = None,
     ) -> None:
         self.sheet_id = sheet_id or os.getenv("IONIA_GOOGLE_SHEET_ID", "").strip()
         self.credentials_json = credentials_json or os.getenv(
@@ -42,6 +44,10 @@ class GoogleSheetsWriter:
         )
         self.validation_keys_range = validation_keys_range or os.getenv(
             "IONIA_SHEETS_VALIDATION_KEYS_RANGE", "validation_keys!A:Z"
+        )
+        self.teams_range = teams_range or os.getenv("IONIA_SHEETS_TEAMS_RANGE", "teams!A:Z")
+        self.players_range = players_range or os.getenv(
+            "IONIA_SHEETS_PLAYERS_RANGE", "players!A:Z"
         )
         self._service = None
         self._enabled = bool(self.sheet_id and (self.credentials_json or self.credentials_file))
@@ -241,6 +247,16 @@ class GoogleSheetsWriter:
             if len(row) > 3 and row[3].lower() == "true":
                 state.revoked_keys.add(key)
         return state
+
+    def append_team_row(self, team_id: str, team_name: str, league: str) -> Optional[int]:
+        row = [team_id, team_name, league]
+        return self._append_row(self.teams_range, row)
+
+    def append_player_row(
+        self, player_id: str, team_id: str, role: str, player_name: str
+    ) -> Optional[int]:
+        row = [player_id, team_id, role, player_name]
+        return self._append_row(self.players_range, row)
 
     def load_dedupe_keys(self) -> List[str]:
         rows = self._get_rows(self.dedupe_range)

@@ -27,7 +27,9 @@ from models import (
     GameSessionResponse,
     GameStartRequest,
     HeartbeatRequest,
+    PlayerCreateRequest,
     StreamReadyRequest,
+    TeamCreateRequest,
 )
 from sheets import GoogleSheetsWriter
 
@@ -336,6 +338,26 @@ def stream_ready(payload: StreamReadyRequest, team_id: str = Depends(require_tea
     event_dedupe.add(dedupe_key)
     if sheets_writer.enabled:
         sheets_writer.append_dedupe_row(dedupe_key, datetime.now(timezone.utc).isoformat())
+    return Ack()
+
+
+@app.post("/admin/add_team", response_model=Ack)
+def add_team(payload: TeamCreateRequest):
+    row_index = sheets_writer.append_team_row(
+        payload.team_id, payload.team_name, payload.league
+    )
+    if sheets_writer.enabled and row_index is None:
+        return _error(502, "failed to write team row to sheets")
+    return Ack()
+
+
+@app.post("/admin/add_player", response_model=Ack)
+def add_player(payload: PlayerCreateRequest):
+    row_index = sheets_writer.append_player_row(
+        payload.player_id, payload.team_id, payload.role, payload.player_name
+    )
+    if sheets_writer.enabled and row_index is None:
+        return _error(502, "failed to write player row to sheets")
     return Ack()
 
 
