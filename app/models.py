@@ -86,13 +86,20 @@ class StreamReadyRequest(BaseModel):
 
 
 class TeamCreateRequest(BaseModel):
-    team_id: str
+    team_tricode: str
     team_name: str
     league: str
 
 
+class TeamCreateResponse(BaseModel):
+    team_id: str
+
+
 class PlayerCreateRequest(BaseModel):
-    player_id: str
     team_id: str
     role: str
     player_name: str
+
+
+class PlayerCreateResponse(BaseModel):
+    player_id: str

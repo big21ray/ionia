@@ -29,8 +29,10 @@ from models import (
     GameStartRequest,
     HeartbeatRequest,
     PlayerCreateRequest,
+    PlayerCreateResponse,
     StreamReadyRequest,
     TeamCreateRequest,
+    TeamCreateResponse,
 )
 from sheets import GoogleSheetsWriter
 
@@ -342,24 +344,26 @@ def stream_ready(payload: StreamReadyRequest, team_id: str = Depends(require_tea
     return Ack()
 
 
-@app.post("/admin/add_team", response_model=Ack)
+@app.post("/admin/add_team", response_model=TeamCreateResponse)
 def add_team(payload: TeamCreateRequest, _: None = Depends(require_admin)):
+    team_id = str(uuid4())
     row_index = sheets_writer.append_team_row(
-        payload.team_id, payload.team_name, payload.league
+        team_id, payload.team_tricode, payload.team_name, payload.league
     )
     if sheets_writer.enabled and row_index is None:
         return _error(502, "failed to write team row to sheets")
-    return Ack()
+    return TeamCreateResponse(team_id=team_id)
 
 
-@app.post("/admin/add_player", response_model=Ack)
+@app.post("/admin/add_player", response_model=PlayerCreateResponse)
 def add_player(payload: PlayerCreateRequest, _: None = Depends(require_admin)):
+    player_id = str(uuid4())
     row_index = sheets_writer.append_player_row(
-        payload.player_id, payload.team_id, payload.role, payload.player_name
+        player_id, payload.team_id, payload.role, payload.player_name
     )
     if sheets_writer.enabled and row_index is None:
         return _error(502, "failed to write player row to sheets")
-    return Ack()
+    return PlayerCreateResponse(player_id=player_id)
 
 
 @app.exception_handler(HTTPException)

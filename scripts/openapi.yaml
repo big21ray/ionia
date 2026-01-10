@@ -103,13 +103,13 @@ components:
     TeamCreateRequest:
       type: object
       required:
-        - team_id
+        - team_tricode
         - team_name
         - league
       properties:
-        team_id:
+        team_tricode:
           type: string
-          example: KC
+          example: FF15
         team_name:
           type: string
           example: Karmine Corp
@@ -117,17 +117,20 @@ components:
           type: string
           example: LEC
 
+    TeamCreateResponse:
+      type: object
+      properties:
+        team_id:
+          type: string
+          example: 2b3b1f2a-3f0a-4f7a-9cc7-2f4b0f7f2e9a
+
     PlayerCreateRequest:
       type: object
       required:
-        - player_id
         - team_id
         - role
         - player_name
       properties:
-        player_id:
-          type: string
-          example: player_001
         team_id:
           type: string
           example: KC
@@ -137,6 +140,13 @@ components:
         player_name:
           type: string
           example: Saken
+
+    PlayerCreateResponse:
+      type: object
+      properties:
+        player_id:
+          type: string
+          example: 5a8d9e5a-1a26-4b7a-9b25-2b9d4a0c77e1
 
 paths:
 
@@ -305,7 +315,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Ack"
+                $ref: "#/components/schemas/TeamCreateResponse"
 
   /admin/add_player:
     post:
@@ -322,4 +332,4 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Ack"
+                $ref: "#/components/schemas/PlayerCreateResponse"

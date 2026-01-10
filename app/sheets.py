@@ -248,8 +248,10 @@ class GoogleSheetsWriter:
                 state.revoked_keys.add(key)
         return state
 
-    def append_team_row(self, team_id: str, team_name: str, league: str) -> Optional[int]:
-        row = [team_id, team_name, league]
+    def append_team_row(
+        self, team_id: str, team_tricode: str, team_name: str, league: str
+    ) -> Optional[int]:
+        row = [team_id, team_tricode, team_name, league]
         return self._append_row(self.teams_range, row)
 
     def append_player_row(
