@@ -152,6 +152,42 @@ components:
           type: string
           example: 5a8d9e5a-1a26-4b7a-9b25-2b9d4a0c77e1
 
+    PlayerLookupRequest:
+      type: object
+      required:
+        - team_tricode
+        - player_name
+      properties:
+        team_tricode:
+          type: string
+          example: FF15
+        player_name:
+          type: string
+          example: Saken
+
+    PlayerLookupResponse:
+      type: object
+      properties:
+        player_id:
+          type: string
+          example: 5a8d9e5a-1a26-4b7a-9b25-2b9d4a0c77e1
+
+    TeamLookupRequest:
+      type: object
+      required:
+        - team_name
+      properties:
+        team_name:
+          type: string
+          example: Karmine Corp
+
+    TeamLookupResponse:
+      type: object
+      properties:
+        team_id:
+          type: string
+          example: 2b3b1f2a-3f0a-4f7a-9cc7-2f4b0f7f2e9a
+
 paths:
 
   /activate:
@@ -337,3 +373,55 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PlayerCreateResponse"
+
+  /client/get_player:
+    post:
+      summary: Lookup a player id by team tricode and player name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlayerLookupRequest"
+      responses:
+        "200":
+          description: Player found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerLookupResponse"
+        "403":
+          description: Bearer not authorized for team
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Player not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /client/get_team:
+    post:
+      summary: Lookup a team id by team name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TeamLookupRequest"
+      responses:
+        "200":
+          description: Team found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamLookupResponse"
+        "404":
+          description: Team not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"

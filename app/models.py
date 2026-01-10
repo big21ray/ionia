@@ -104,3 +104,20 @@ class PlayerCreateRequest(BaseModel):
 
 class PlayerCreateResponse(BaseModel):
     player_id: str
+
+
+class PlayerLookupRequest(BaseModel):
+    team_tricode: str
+    player_name: str
+
+
+class PlayerLookupResponse(BaseModel):
+    player_id: str
+
+
+class TeamLookupRequest(BaseModel):
+    team_name: str
+
+
+class TeamLookupResponse(BaseModel):
+    team_id: str

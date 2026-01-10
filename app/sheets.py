@@ -255,9 +255,14 @@ class GoogleSheetsWriter:
         return self._append_row(self.teams_range, row)
 
     def append_player_row(
-        self, player_id: str, team_id: str, role: str, player_name: str
+        self,
+        player_id: str,
+        player_name: str,
+        role: str,
+        team_id: str,
+        active: bool,
     ) -> Optional[int]:
-        row = [player_id, team_id, role, player_name]
+        row = [player_id, player_name, role, team_id, str(active).lower()]
         return self._append_row(self.players_range, row)
 
     def find_team_id_by_tricode(self, team_tricode: str) -> Optional[str]:
@@ -269,6 +274,31 @@ class GoogleSheetsWriter:
             tricode = row[1]
             if tricode == team_tricode:
                 return team_id
+        return None
+
+    def find_team_id_by_name(self, team_name: str) -> Optional[str]:
+        rows = self._get_rows(self.teams_range)
+        for row in rows:
+            if len(row) < 3:
+                continue
+            team_id = row[0]
+            name = row[2]
+            if name == team_name:
+                return team_id
+        return None
+
+    def find_player_id_by_team_and_name(
+        self, team_id: str, player_name: str
+    ) -> Optional[str]:
+        rows = self._get_rows(self.players_range)
+        for row in rows:
+            if len(row) < 4:
+                continue
+            player_id = row[0]
+            name = row[1]
+            row_team_id = row[3]
+            if row_team_id == team_id and name == player_name:
+                return player_id
         return None
 
     def load_dedupe_keys(self) -> List[str]:

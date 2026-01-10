@@ -30,9 +30,13 @@ from models import (
     HeartbeatRequest,
     PlayerCreateRequest,
     PlayerCreateResponse,
+    PlayerLookupRequest,
+    PlayerLookupResponse,
     StreamReadyRequest,
     TeamCreateRequest,
     TeamCreateResponse,
+    TeamLookupRequest,
+    TeamLookupResponse,
 )
 from sheets import GoogleSheetsWriter
 
@@ -362,11 +366,34 @@ def add_player(payload: PlayerCreateRequest, _: None = Depends(require_admin)):
     if not team_id:
         return _error(400, "unknown team_tricode")
     row_index = sheets_writer.append_player_row(
-        player_id, team_id, payload.role, payload.player_name
+        player_id, payload.player_name, payload.role, team_id, payload.active
     )
     if sheets_writer.enabled and row_index is None:
         return _error(502, "failed to write player row to sheets")
     return PlayerCreateResponse(player_id=player_id)
+
+
+@app.post("/client/get_player", response_model=PlayerLookupResponse)
+def get_player(payload: PlayerLookupRequest, team_id: str = Depends(require_team_id)):
+    target_team_id = sheets_writer.find_team_id_by_tricode(payload.team_tricode)
+    if not target_team_id:
+        return _error(404, "team not found")
+    if target_team_id != team_id:
+        return _error(403, "forbidden")
+    player_id = sheets_writer.find_player_id_by_team_and_name(
+        target_team_id, payload.player_name
+    )
+    if not player_id:
+        return _error(404, "player not found")
+    return PlayerLookupResponse(player_id=player_id)
+
+
+@app.post("/client/get_team", response_model=TeamLookupResponse)
+def get_team(payload: TeamLookupRequest, _: str = Depends(require_team_id)):
+    team_id = sheets_writer.find_team_id_by_name(payload.team_name)
+    if not team_id:
+        return _error(404, "team not found")
+    return TeamLookupResponse(team_id=team_id)
 
 
 @app.exception_handler(HTTPException)
